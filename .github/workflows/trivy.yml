@@ -1,0 +1,49 @@
+name: Trivy Image Scan
+
+on:
+  push:
+    branches:
+      - trivy
+  schedule:
+    - cron: '17 9 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  TRIVY_VEX: oci
+
+jobs:
+  scan:
+    name: ${{ matrix.image }} ${{ matrix.version }} linux/${{ matrix.arch }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        version:
+          - v1.4.1
+          - v1.3.1
+        image:
+          - agentgateway
+          - controller
+        arch:
+          - amd64
+          - arm64
+    env:
+      TRIVY_PLATFORM: linux/${{ matrix.arch }}
+    steps:
+      - name: Report all vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/agentgateway/${{ matrix.image }}:${{ matrix.version }}
+          version: v0.73.0
+          exit-code: '0'
+
+      - name: Fail on high or critical vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/agentgateway/${{ matrix.image }}:${{ matrix.version }}
+          version: v0.73.0
+          severity: HIGH,CRITICAL
+          exit-code: '1'
