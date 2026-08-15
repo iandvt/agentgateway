@@ -70,6 +70,12 @@ pub fn translate(req: &types::responses::Request) -> Result<(Vec<u8>, State), AI
 	let raw = serde_json::to_value(req).map_err(AIError::RequestMarshal)?;
 	let output_format = responses_output_format(&raw)?;
 	let reasoning_effort = validate_top_level(&raw)?;
+	let reasoning_disabled = raw
+		.get("reasoning")
+		.and_then(serde_json::Value::as_object)
+		.and_then(|reasoning| reasoning.get("effort"))
+		.and_then(serde_json::Value::as_str)
+		.is_some_and(|effort| effort == "none");
 	let mut state = State::default();
 	if req
 		.temperature
@@ -125,7 +131,11 @@ pub fn translate(req: &types::responses::Request) -> Result<(Vec<u8>, State), AI
 		tools: (!tools.is_empty()).then_some(tools),
 		tool_choice,
 		metadata,
-		thinking: reasoning_effort.map(|_| messages::ThinkingInput::Adaptive {}),
+		thinking: if reasoning_disabled {
+			Some(messages::ThinkingInput::Disabled {})
+		} else {
+			reasoning_effort.map(|_| messages::ThinkingInput::Adaptive {})
+		},
 		output_config,
 	};
 	let body = serde_json::to_vec(&translated).map_err(AIError::RequestMarshal)?;

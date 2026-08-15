@@ -5250,16 +5250,21 @@ fn output_format_rejects_non_strict_legacy_missing_and_unknown_shapes() {
 	}
 }
 
-#[rstest::rstest]
-#[case(None)]
-#[case(Some("none"))]
-fn absent_or_none_reasoning_emits_no_thinking_or_effort(#[case] effort: Option<&str>) {
-	let mut value = json!({"input": "question", "model": "claude-sonnet-4-5"});
-	if let Some(effort) = effort {
-		value["reasoning"] = json!({"effort": effort});
-	}
-	let actual = translated(value);
+#[test]
+fn absent_reasoning_emits_no_thinking_or_effort() {
+	let actual = translated(json!({"input": "question", "model": "claude-sonnet-4-5"}));
 	assert!(actual.get("thinking").is_none());
+	assert!(actual.get("output_config").is_none());
+}
+
+#[test]
+fn none_reasoning_disables_thinking() {
+	let actual = translated(json!({
+		"input": "question",
+		"model": "claude-sonnet-4-5",
+		"reasoning": {"effort": "none"}
+	}));
+	assert_eq!(actual["thinking"], json!({"type": "disabled"}));
 	assert!(actual.get("output_config").is_none());
 }
 
