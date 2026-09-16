@@ -3817,6 +3817,14 @@
 |`binds[].listeners[].routes[].policies.remoteRateLimit.descriptors[].cost`|string|cost determines the optional expression to determine the cost of the request.<br>If unset, type `requests` defaults to `1`, and type `tokens` defaults to `llm.totalTokens`.<br>If the expression fails to evaluate, the descriptor is skipped.<br>Costs for type `requests` are evaluated during request processing. Costs for type `tokens`<br>are evaluated upon request completion.|
 |`binds[].listeners[].routes[].policies.remoteRateLimit.descriptors[].limitOverride`|string|limitOverride determines the optional expression to determine the limit of the request.<br>This tells the remote server what limit to apply to the request.<br>Note: this does not specify the *cost* of the request, which is done by the `cost` field.<br>The expression must evaluate to a map with `unit` and `requestsPerUnit` keys. For example:<br>`{"unit":"second","requestsPerUnit":100}`.<br>Valid units: second, minute, hour, day, month, year<br>If the expression fails to evaluate, the descriptor is skipped.|
 |`binds[].listeners[].routes[].policies.remoteRateLimit.failureMode`|enum|Behavior when the remote rate limit service is unavailable or returns an error.<br>Defaults to failClosed, denying requests with a 500 status on service failure.<br>Possible values: `failClosed`, `FailClosed`, `failOpen`, `FailOpen`.|
+|`binds[].listeners[].routes[].policies.copilot`|object|Authenticate users with native GitHub login and encrypted Copilot credentials.|
+|`binds[].listeners[].routes[].policies.copilot.clientId`|string||
+|`binds[].listeners[].routes[].policies.copilot.audience`|string||
+|`binds[].listeners[].routes[].policies.copilot.allowedUserIds`|[]integer||
+|`binds[].listeners[].routes[].policies.copilot.credentialTTL`|string||
+|`binds[].listeners[].routes[].policies.copilot.disableExpiry`|boolean||
+|`binds[].listeners[].routes[].policies.copilot.encryptionKey`|object|A protected file containing exactly 32 raw bytes. Inline keys are rejected.|
+|`binds[].listeners[].routes[].policies.copilot.encryptionKey.file`|string|Path to a file on disk to load the value from.|
 |`binds[].listeners[].routes[].policies.jwtAuth`|object|Authenticate incoming requests with JWT bearer tokens.|
 |`binds[].listeners[].routes[].policies.jwtAuth.mode`|enum|Controls whether requests must include a JWT and how validation failures are handled.<br>Possible values: `strict`, `optional`, `permissive`.|
 |`binds[].listeners[].routes[].policies.jwtAuth.location`|object|Where to read the JWT from in incoming requests.<br>Exactly one of header, queryParameter, cookie, or expression may be set.|
@@ -23270,6 +23278,14 @@
 |`policies[].policy.remoteRateLimit.descriptors[].cost`|string|cost determines the optional expression to determine the cost of the request.<br>If unset, type `requests` defaults to `1`, and type `tokens` defaults to `llm.totalTokens`.<br>If the expression fails to evaluate, the descriptor is skipped.<br>Costs for type `requests` are evaluated during request processing. Costs for type `tokens`<br>are evaluated upon request completion.|
 |`policies[].policy.remoteRateLimit.descriptors[].limitOverride`|string|limitOverride determines the optional expression to determine the limit of the request.<br>This tells the remote server what limit to apply to the request.<br>Note: this does not specify the *cost* of the request, which is done by the `cost` field.<br>The expression must evaluate to a map with `unit` and `requestsPerUnit` keys. For example:<br>`{"unit":"second","requestsPerUnit":100}`.<br>Valid units: second, minute, hour, day, month, year<br>If the expression fails to evaluate, the descriptor is skipped.|
 |`policies[].policy.remoteRateLimit.failureMode`|enum|Behavior when the remote rate limit service is unavailable or returns an error.<br>Defaults to failClosed, denying requests with a 500 status on service failure.<br>Possible values: `failClosed`, `FailClosed`, `failOpen`, `FailOpen`.|
+|`policies[].policy.copilot`|object|Authenticate users with native GitHub login and encrypted Copilot credentials.|
+|`policies[].policy.copilot.clientId`|string||
+|`policies[].policy.copilot.audience`|string||
+|`policies[].policy.copilot.allowedUserIds`|[]integer||
+|`policies[].policy.copilot.credentialTTL`|string||
+|`policies[].policy.copilot.disableExpiry`|boolean||
+|`policies[].policy.copilot.encryptionKey`|object|A protected file containing exactly 32 raw bytes. Inline keys are rejected.|
+|`policies[].policy.copilot.encryptionKey.file`|string|Path to a file on disk to load the value from.|
 |`policies[].policy.jwtAuth`|object|Authenticate incoming requests with JWT bearer tokens.|
 |`policies[].policy.jwtAuth.mode`|enum|Controls whether requests must include a JWT and how validation failures are handled.<br>Possible values: `strict`, `optional`, `permissive`.|
 |`policies[].policy.jwtAuth.location`|object|Where to read the JWT from in incoming requests.<br>Exactly one of header, queryParameter, cookie, or expression may be set.|
@@ -39597,6 +39613,14 @@
 |`routeGroups[].routes[].policies.remoteRateLimit.descriptors[].cost`|string|cost determines the optional expression to determine the cost of the request.<br>If unset, type `requests` defaults to `1`, and type `tokens` defaults to `llm.totalTokens`.<br>If the expression fails to evaluate, the descriptor is skipped.<br>Costs for type `requests` are evaluated during request processing. Costs for type `tokens`<br>are evaluated upon request completion.|
 |`routeGroups[].routes[].policies.remoteRateLimit.descriptors[].limitOverride`|string|limitOverride determines the optional expression to determine the limit of the request.<br>This tells the remote server what limit to apply to the request.<br>Note: this does not specify the *cost* of the request, which is done by the `cost` field.<br>The expression must evaluate to a map with `unit` and `requestsPerUnit` keys. For example:<br>`{"unit":"second","requestsPerUnit":100}`.<br>Valid units: second, minute, hour, day, month, year<br>If the expression fails to evaluate, the descriptor is skipped.|
 |`routeGroups[].routes[].policies.remoteRateLimit.failureMode`|enum|Behavior when the remote rate limit service is unavailable or returns an error.<br>Defaults to failClosed, denying requests with a 500 status on service failure.<br>Possible values: `failClosed`, `FailClosed`, `failOpen`, `FailOpen`.|
+|`routeGroups[].routes[].policies.copilot`|object|Authenticate users with native GitHub login and encrypted Copilot credentials.|
+|`routeGroups[].routes[].policies.copilot.clientId`|string||
+|`routeGroups[].routes[].policies.copilot.audience`|string||
+|`routeGroups[].routes[].policies.copilot.allowedUserIds`|[]integer||
+|`routeGroups[].routes[].policies.copilot.credentialTTL`|string||
+|`routeGroups[].routes[].policies.copilot.disableExpiry`|boolean||
+|`routeGroups[].routes[].policies.copilot.encryptionKey`|object|A protected file containing exactly 32 raw bytes. Inline keys are rejected.|
+|`routeGroups[].routes[].policies.copilot.encryptionKey.file`|string|Path to a file on disk to load the value from.|
 |`routeGroups[].routes[].policies.jwtAuth`|object|Authenticate incoming requests with JWT bearer tokens.|
 |`routeGroups[].routes[].policies.jwtAuth.mode`|enum|Controls whether requests must include a JWT and how validation failures are handled.<br>Possible values: `strict`, `optional`, `permissive`.|
 |`routeGroups[].routes[].policies.jwtAuth.location`|object|Where to read the JWT from in incoming requests.<br>Exactly one of header, queryParameter, cookie, or expression may be set.|
@@ -58575,6 +58599,14 @@
 |`routes[].policies.remoteRateLimit.descriptors[].cost`|string|cost determines the optional expression to determine the cost of the request.<br>If unset, type `requests` defaults to `1`, and type `tokens` defaults to `llm.totalTokens`.<br>If the expression fails to evaluate, the descriptor is skipped.<br>Costs for type `requests` are evaluated during request processing. Costs for type `tokens`<br>are evaluated upon request completion.|
 |`routes[].policies.remoteRateLimit.descriptors[].limitOverride`|string|limitOverride determines the optional expression to determine the limit of the request.<br>This tells the remote server what limit to apply to the request.<br>Note: this does not specify the *cost* of the request, which is done by the `cost` field.<br>The expression must evaluate to a map with `unit` and `requestsPerUnit` keys. For example:<br>`{"unit":"second","requestsPerUnit":100}`.<br>Valid units: second, minute, hour, day, month, year<br>If the expression fails to evaluate, the descriptor is skipped.|
 |`routes[].policies.remoteRateLimit.failureMode`|enum|Behavior when the remote rate limit service is unavailable or returns an error.<br>Defaults to failClosed, denying requests with a 500 status on service failure.<br>Possible values: `failClosed`, `FailClosed`, `failOpen`, `FailOpen`.|
+|`routes[].policies.copilot`|object|Authenticate users with native GitHub login and encrypted Copilot credentials.|
+|`routes[].policies.copilot.clientId`|string||
+|`routes[].policies.copilot.audience`|string||
+|`routes[].policies.copilot.allowedUserIds`|[]integer||
+|`routes[].policies.copilot.credentialTTL`|string||
+|`routes[].policies.copilot.disableExpiry`|boolean||
+|`routes[].policies.copilot.encryptionKey`|object|A protected file containing exactly 32 raw bytes. Inline keys are rejected.|
+|`routes[].policies.copilot.encryptionKey.file`|string|Path to a file on disk to load the value from.|
 |`routes[].policies.jwtAuth`|object|Authenticate incoming requests with JWT bearer tokens.|
 |`routes[].policies.jwtAuth.mode`|enum|Controls whether requests must include a JWT and how validation failures are handled.<br>Possible values: `strict`, `optional`, `permissive`.|
 |`routes[].policies.jwtAuth.location`|object|Where to read the JWT from in incoming requests.<br>Exactly one of header, queryParameter, cookie, or expression may be set.|
@@ -82629,6 +82661,14 @@
 |`mcp.policies.remoteRateLimit.descriptors[].cost`|string|cost determines the optional expression to determine the cost of the request.<br>If unset, type `requests` defaults to `1`, and type `tokens` defaults to `llm.totalTokens`.<br>If the expression fails to evaluate, the descriptor is skipped.<br>Costs for type `requests` are evaluated during request processing. Costs for type `tokens`<br>are evaluated upon request completion.|
 |`mcp.policies.remoteRateLimit.descriptors[].limitOverride`|string|limitOverride determines the optional expression to determine the limit of the request.<br>This tells the remote server what limit to apply to the request.<br>Note: this does not specify the *cost* of the request, which is done by the `cost` field.<br>The expression must evaluate to a map with `unit` and `requestsPerUnit` keys. For example:<br>`{"unit":"second","requestsPerUnit":100}`.<br>Valid units: second, minute, hour, day, month, year<br>If the expression fails to evaluate, the descriptor is skipped.|
 |`mcp.policies.remoteRateLimit.failureMode`|enum|Behavior when the remote rate limit service is unavailable or returns an error.<br>Defaults to failClosed, denying requests with a 500 status on service failure.<br>Possible values: `failClosed`, `FailClosed`, `failOpen`, `FailOpen`.|
+|`mcp.policies.copilot`|object|Authenticate users with native GitHub login and encrypted Copilot credentials.|
+|`mcp.policies.copilot.clientId`|string||
+|`mcp.policies.copilot.audience`|string||
+|`mcp.policies.copilot.allowedUserIds`|[]integer||
+|`mcp.policies.copilot.credentialTTL`|string||
+|`mcp.policies.copilot.disableExpiry`|boolean||
+|`mcp.policies.copilot.encryptionKey`|object|A protected file containing exactly 32 raw bytes. Inline keys are rejected.|
+|`mcp.policies.copilot.encryptionKey.file`|string|Path to a file on disk to load the value from.|
 |`mcp.policies.jwtAuth`|object|Authenticate incoming requests with JWT bearer tokens.|
 |`mcp.policies.jwtAuth.mode`|enum|Controls whether requests must include a JWT and how validation failures are handled.<br>Possible values: `strict`, `optional`, `permissive`.|
 |`mcp.policies.jwtAuth.location`|object|Where to read the JWT from in incoming requests.<br>Exactly one of header, queryParameter, cookie, or expression may be set.|

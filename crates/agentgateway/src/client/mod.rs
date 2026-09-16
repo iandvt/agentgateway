@@ -297,6 +297,8 @@ struct Connector {
 	backend_config: Arc<crate::BackendConfig>,
 	metrics: Option<Arc<crate::metrics::Metrics>>,
 	resolver: Arc<dns::CachedResolver>,
+	#[cfg(test)]
+	mock_tls_transport: Arc<std::sync::OnceLock<(Target, SocketAddr)>>,
 }
 
 async fn dial(
@@ -322,6 +324,19 @@ impl Connector {
 		connection: ConnectionConfig,
 		http: bool,
 	) -> Result<Socket, http::Error> {
+		#[cfg(test)]
+		if let Some((expected, endpoint)) = self.mock_tls_transport.get() {
+			assert_eq!(
+				&target, expected,
+				"unexpected destination for mock transport"
+			);
+			assert_eq!(ep, *endpoint);
+			assert!(matches!(
+				connection.transport,
+				Transport::Plain(ApplicationTransport::Tls(_))
+			));
+			return dial(&target, *endpoint, &self.backend_config).await;
+		}
 		let ConnectionConfig {
 			transport,
 			tcp,
@@ -473,6 +488,15 @@ impl Connector {
 		skip_resolution: bool,
 		target: &Target,
 	) -> Result<SocketAddr, ProxyError> {
+		#[cfg(test)]
+		if let Some((expected, endpoint)) = self.mock_tls_transport.get() {
+			assert_eq!(
+				target, expected,
+				"unexpected destination for mock transport"
+			);
+			assert!(!skip_resolution);
+			return Ok(*endpoint);
+		}
 		let dest = match &target {
 			Target::Address(addr) => *addr,
 			Target::Hostname(hostname, port) => {
@@ -529,6 +553,18 @@ pub struct Config {
 }
 
 impl Client {
+	/// Mock only the physical TLS connection with a loopback HTTP server. Request
+	/// routing, URI construction, and configured TLS policy remain unchanged.
+	#[cfg(test)]
+	pub(crate) fn mock_tls_transport(&self, target: Target, endpoint: SocketAddr) {
+		assert!(endpoint.ip().is_loopback());
+		self
+			.connector
+			.mock_tls_transport
+			.set((target, endpoint))
+			.expect("mock transport must be installed once before sending requests");
+	}
+
 	pub fn new(
 		cfg: &Config,
 		hbone_pool: Option<agent_hbone::pool::WorkloadHBONEPool<hbone::WorkloadKey>>,
@@ -571,6 +607,8 @@ impl Client {
 			h2_config,
 			backend_config: Arc::new(backend_config),
 			metrics,
+			#[cfg(test)]
+			mock_tls_transport: Default::default(),
 		};
 		let client = b.build(connector.clone());
 		Client { client, connector }

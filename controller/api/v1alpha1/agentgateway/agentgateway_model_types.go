@@ -55,6 +55,7 @@ type AgentgatewayModelList struct {
 // +kubebuilder:validation:XValidation:rule="has(self.vertexai) == (has(self.provider) && self.provider == 'VertexAI')",message="vertexai must be set if and only if provider is VertexAI"
 // +kubebuilder:validation:XValidation:rule="has(self.bedrock) == (has(self.provider) && self.provider == 'Bedrock')",message="bedrock must be set if and only if provider is Bedrock"
 // +kubebuilder:validation:XValidation:rule="has(self.custom) == (has(self.provider) && self.provider == 'Custom')",message="custom must be set if and only if provider is Custom"
+// +kubebuilder:validation:XValidation:rule="!has(self.policies) || !has(self.policies.auth) || !has(self.policies.auth.copilotUser) || (has(self.provider) && self.provider == 'Copilot' && !has(self.baseURL))",message="copilotUser requires the Copilot provider without endpoint overrides"
 type AgentgatewayModelSpec struct {
 	// Parent resources to which this model attaches. Supported parent kinds are
 	// Gateway, ListenerSet, and HTTPRoute.
@@ -167,10 +168,15 @@ type ModelPolicies struct {
 }
 
 // ModelBackendAuth configures credentials for a model provider.
-// +kubebuilder:validation:AtMostOneOf=key;secretRef;passthrough;aws;azure;gcp;oauthTokenExchange
-// +kubebuilder:validation:XValidation:rule="has(self.credentials) || has(self.key) || has(self.secretRef) || has(self.passthrough) || has(self.aws) || has(self.azure) || has(self.gcp) || has(self.oauthTokenExchange)",message="must specify credentials, or at most one of key/secretRef/passthrough/aws/azure/gcp/oauthTokenExchange (credentials may be combined with a primary auth kind)"
+// +kubebuilder:validation:AtMostOneOf=key;secretRef;passthrough;aws;azure;gcp;oauthTokenExchange;copilotUser
+// +kubebuilder:validation:XValidation:rule="has(self.credentials) || has(self.key) || has(self.secretRef) || has(self.passthrough) || has(self.aws) || has(self.azure) || has(self.gcp) || has(self.oauthTokenExchange) || has(self.copilotUser)",message="must specify credentials, or at most one of key/secretRef/passthrough/aws/azure/gcp/oauthTokenExchange/copilotUser (credentials may be combined with a primary auth kind)"
 // +kubebuilder:validation:XValidation:rule="has(self.location) ? has(self.key) || has(self.secretRef) || has(self.passthrough) : true",message="location may only be set for key, secretRef, or passthrough auth"
+// +kubebuilder:validation:XValidation:rule="!has(self.copilotUser) || !has(self.credentials)",message="copilotUser may not be combined with credentials"
 type ModelBackendAuth struct {
+	// Uses only the verified credential from traffic.copilot.
+	// +optional
+	CopilotUser *CopilotUserAuth `json:"copilotUser,omitempty"`
+
 	// Inline key to use as the value of the `Authorization` header. This option
 	// is the least secure; usage of a `Secret` is preferred.
 	// +kubebuilder:validation:MaxLength=2048
@@ -240,6 +246,7 @@ func (a *ModelBackendAuth) BackendAuth() *BackendAuth {
 		Azure:              a.Azure,
 		GCP:                a.GCP,
 		OAuthTokenExchange: a.OAuthTokenExchange,
+		CopilotUser:        a.CopilotUser,
 		Location:           a.Location,
 		Credentials:        a.Credentials,
 	}
@@ -260,6 +267,7 @@ type ModelMatch struct {
 type ModelProvider string
 
 const (
+	ModelProviderCopilot     ModelProvider = "Copilot"
 	ModelProviderOpenAI      ModelProvider = "OpenAI"
 	ModelProviderAzure       ModelProvider = "Azure"
 	ModelProviderAnthropic   ModelProvider = "Anthropic"

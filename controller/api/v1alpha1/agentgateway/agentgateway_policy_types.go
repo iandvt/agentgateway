@@ -952,6 +952,10 @@ const (
 
 // +kubebuilder:validation:IfThenOnlyFields:if="has(self.phase) && self.phase == 'PreRouting'",fields=phase;authorization;transformation;extProc;extAuth;jwtAuthentication;basicAuthentication;apiKeyAuthentication;cors,message="phase PreRouting only supports extAuth, authorization, transformation, extProc, jwtAuthentication, basicAuthentication, apiKeyAuthentication and cors"
 type Traffic struct {
+	// Authenticates GitHub users and handles Copilot device login after routing.
+	// +optional
+	Copilot *CopilotAuthentication `json:"copilot,omitempty"`
+
 	// The phase to apply the traffic policy to. If the phase is `PreRouting`,
 	// the `targetRef` must be a `Gateway` or a `Listener`. `PreRouting` is
 	// typically used only when a policy needs to influence the routing
@@ -1582,10 +1586,15 @@ const (
 	HostnameRewriteModeNone HostnameRewriteMode = "None"
 )
 
-// +kubebuilder:validation:AtMostOneOf=key;secretRef;passthrough;aws;azure;gcp;oauthTokenExchange;crossAppAccess;jwtSign
-// +kubebuilder:validation:XValidation:rule="has(self.credentials) || has(self.key) || has(self.secretRef) || has(self.passthrough) || has(self.aws) || has(self.azure) || has(self.gcp) || has(self.oauthTokenExchange) || has(self.crossAppAccess) || has(self.jwtSign)",message="must specify credentials, or at most one of key/secretRef/passthrough/aws/azure/gcp/oauthTokenExchange/crossAppAccess/jwtSign (credentials may be combined with a primary auth kind)"
+// +kubebuilder:validation:AtMostOneOf=key;secretRef;passthrough;aws;azure;gcp;oauthTokenExchange;crossAppAccess;jwtSign;copilotUser
+// +kubebuilder:validation:XValidation:rule="has(self.credentials) || has(self.key) || has(self.secretRef) || has(self.passthrough) || has(self.aws) || has(self.azure) || has(self.gcp) || has(self.oauthTokenExchange) || has(self.crossAppAccess) || has(self.jwtSign) || has(self.copilotUser)",message="must specify credentials, or at most one of key/secretRef/passthrough/aws/azure/gcp/oauthTokenExchange/crossAppAccess/jwtSign/copilotUser (credentials may be combined with a primary auth kind)"
 // +kubebuilder:validation:XValidation:rule="has(self.location) ? has(self.key) || has(self.secretRef) || has(self.passthrough) : true",message="location may only be set for key, secretRef, or passthrough auth"
+// +kubebuilder:validation:XValidation:rule="!has(self.copilotUser) || !has(self.credentials)",message="copilotUser may not be combined with credentials"
 type BackendAuth struct {
+	// Uses only the verified credential from traffic.copilot.
+	// +optional
+	CopilotUser *CopilotUserAuth `json:"copilotUser,omitempty"`
+
 	// Inline key to use as the value of the
 	// `Authorization` header. This option is the least secure; usage of a
 	// `Secret` is preferred.
@@ -1654,6 +1663,45 @@ type BackendAuth struct {
 	// +kubebuilder:validation:MaxItems=8
 	// +listType=atomic
 	Credentials []BackendAuthCredential `json:"credentials,omitempty"`
+}
+
+// CopilotUserAuth selects the request's verified GitHub credential.
+type CopilotUserAuth struct{}
+
+// CopilotAuthentication handles device login and validates encrypted GitHub credentials.
+// +kubebuilder:validation:ExactlyOneOf=credentialTTL;disableExpiry
+// +kubebuilder:validation:XValidation:rule="!has(self.disableExpiry) || self.disableExpiry",message="disableExpiry must be true"
+// +kubebuilder:validation:XValidation:rule="!has(self.credentialTTL) || duration(self.credentialTTL) > duration('0s')",message="credentialTTL must be positive"
+type CopilotAuthentication struct {
+	// GitHub app client ID used for device authorization.
+	// +required
+	ClientID ShortString `json:"clientId"`
+
+	// Deployment identity authenticated in every credential.
+	// +required
+	Audience LongString `json:"audience"`
+
+	// Verified GitHub user IDs admitted by this policy.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=1024
+	// +kubebuilder:validation:XValidation:rule="self.all(id, id > 0)",message="allowedUserIds must be positive"
+	// +listType=set
+	// +required
+	AllowedUserIDs []int64 `json:"allowedUserIds"`
+
+	// Maximum gateway credential lifetime. GitHub expiration still applies.
+	// +optional
+	CredentialTTL *Duration `json:"credentialTTL,omitempty"`
+
+	// Explicitly disables gateway expiration. GitHub expiration still applies.
+	// +optional
+	DisableExpiry *bool `json:"disableExpiry,omitempty"`
+
+	// Same-namespace Secret key containing exactly 32 raw encryption bytes.
+	// Defaults to the data key "key".
+	// +kubebuilder:validation:XValidation:rule="(!has(self.group) || self.group == '') && (!has(self.kind) || self.kind == '' || self.kind == 'Secret')",message="encryptionKeyRef must reference a Secret"
+	// +required
+	EncryptionKeyRef LocalSecretKeyRef `json:"encryptionKeyRef"`
 }
 
 // BackendAuthCredential specifies one additional credential to inject on the

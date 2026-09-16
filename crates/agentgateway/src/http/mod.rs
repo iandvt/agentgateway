@@ -18,6 +18,7 @@ pub mod authorization;
 pub mod backendtls;
 pub mod basicauth;
 pub mod compression;
+pub mod copilot;
 pub mod csrf;
 pub mod envoy_proto_common;
 pub mod ext_authz;

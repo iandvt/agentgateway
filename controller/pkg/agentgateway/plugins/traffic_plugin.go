@@ -61,6 +61,7 @@ const (
 	jwtPolicySuffix                = ":jwt"
 	basicAuthPolicySuffix          = ":basicauth"
 	apiKeyPolicySuffix             = ":apikeyauth" //nolint:gosec
+	copilotPolicySuffix            = ":copilot"
 	directResponseSuffix           = ":direct-response"
 	bufferSuffix                   = ":buffer"
 )
@@ -492,6 +493,10 @@ func translateTrafficPolicyToAgw(
 		}
 	}
 
+	if traffic.Copilot != nil {
+		appendPolicy("copilot")(processCopilotAuthenticationPolicy(ctx, traffic.Copilot, traffic.Phase, basePolicyName, policyName))
+	}
+
 	// Convert ExtAuth policy if present
 	if traffic.ExtAuth != nil {
 		appendPolicy("extAuth")(processConditional(
@@ -914,6 +919,79 @@ func validateAPIKeyHash(keyHash string) error {
 		return fmt.Errorf("keyHash sha256 digest must decode to 32 bytes")
 	}
 	return nil
+}
+
+func processCopilotAuthenticationPolicy(
+	ctx PolicyCtx,
+	auth *agentgateway.CopilotAuthentication,
+	policyPhase *agentgateway.PolicyPhase,
+	basePolicyName string,
+	policy types.NamespacedName,
+) (*api.Policy, error) {
+	p := &api.CopilotAuthentication{
+		ClientId: auth.ClientID,
+		Audience: auth.Audience,
+		PolicyId: basePolicyName + copilotPolicySuffix,
+	}
+	var errs []error
+	if policyPhase != nil && *policyPhase != agentgateway.PolicyPhasePostRouting {
+		errs = append(errs, errors.New("copilot authentication requires PostRouting"))
+	}
+	if strings.TrimSpace(auth.ClientID) == "" || len(auth.ClientID) > 256 {
+		errs = append(errs, errors.New("copilot clientId must contain 1 to 256 characters"))
+	}
+	if strings.TrimSpace(auth.Audience) == "" || len(auth.Audience) > 1024 {
+		errs = append(errs, errors.New("copilot audience must contain 1 to 1024 characters"))
+	}
+	if len(auth.AllowedUserIDs) == 0 || len(auth.AllowedUserIDs) > 1024 {
+		errs = append(errs, errors.New("copilot allowedUserIds must contain 1 to 1024 positive IDs"))
+	}
+	for _, id := range auth.AllowedUserIDs {
+		if id <= 0 {
+			errs = append(errs, errors.New("copilot allowedUserIds must be positive"))
+			break
+		}
+		p.AllowedUserIds = append(p.AllowedUserIds, uint64(id))
+	}
+	if (auth.CredentialTTL == nil) == (auth.DisableExpiry == nil) {
+		errs = append(errs, errors.New("copilot requires exactly one of credentialTTL or disableExpiry"))
+	} else if auth.CredentialTTL != nil {
+		if auth.CredentialTTL.Duration <= 0 {
+			errs = append(errs, errors.New("copilot credentialTTL must be positive"))
+		} else {
+			p.Lifetime = &api.CopilotAuthentication_CredentialTtl{CredentialTtl: durationpb.New(auth.CredentialTTL.Duration)}
+		}
+	} else if !*auth.DisableExpiry {
+		errs = append(errs, errors.New("copilot disableExpiry must be true"))
+	} else {
+		p.Lifetime = &api.CopilotAuthentication_DisableExpiry{DisableExpiry: true}
+	}
+	ref := auth.EncryptionKeyRef
+	if ref.Name == "" || ref.Group != "" || (ref.Kind != "" && ref.Kind != "Secret") || (ref.Key != nil && *ref.Key == "") {
+		errs = append(errs, errors.New("copilot encryptionKeyRef must reference a same-namespace Secret key"))
+	} else {
+		data, key, err := ctx.ResolveCredentialKeyRef(ref, policy.Namespace, "key")
+		if err != nil {
+			errs = append(errs, errors.New("failed to resolve copilot encryption Secret"))
+		} else if len(data[key]) != 32 {
+			errs = append(errs, errors.New("copilot encryption Secret key must contain exactly 32 bytes"))
+		} else {
+			p.EncryptionKey = bytes.Clone(data[key])
+		}
+	}
+	err := errors.Join(errs...)
+	if err != nil {
+		p.TranslationError = new(err.Error())
+		p.EncryptionKey = nil
+	}
+	return &api.Policy{
+		Key:  p.PolicyId,
+		Name: TypedResourceFromName(wellknown.AgentgatewayPolicyGVK.Kind, policy),
+		Kind: &api.Policy_Traffic{Traffic: &api.TrafficPolicySpec{
+			Phase: api.TrafficPolicySpec_ROUTE,
+			Kind:  &api.TrafficPolicySpec_Copilot{Copilot: p},
+		}},
+	}, err
 }
 
 func processAPIKeyAuthenticationPolicy(

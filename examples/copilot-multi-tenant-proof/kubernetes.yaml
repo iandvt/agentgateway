@@ -1,0 +1,144 @@
+# Build both images from this worktree before applying. Secret values are operator supplied.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: copilot-proof
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayParameters
+metadata:
+  name: copilot
+  namespace: copilot-proof
+spec:
+  image:
+    registry: localhost
+    repository: copilot-proof/agentgateway
+    tag: native
+    pullPolicy: Never
+  deployment:
+    spec:
+      replicas: 1
+      strategy:
+        type: Recreate
+  service:
+    spec:
+      type: ClusterIP
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: copilot
+  namespace: copilot-proof
+spec:
+  gatewayClassName: agentgateway
+  infrastructure:
+    parametersRef:
+      group: agentgateway.dev
+      kind: AgentgatewayParameters
+      name: copilot
+  listeners:
+  - name: https
+    hostname: copilot.local.test
+    port: 443
+    protocol: HTTPS
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - group: ""
+        kind: Secret
+        name: copilot-tls
+    allowedRoutes:
+      namespaces:
+        from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: copilot
+  namespace: copilot-proof
+spec:
+  parentRefs:
+  - name: copilot
+    sectionName: https
+  hostnames:
+  - copilot.local.test
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /login
+    - path:
+        type: PathPrefix
+        value: /v1
+    backendRefs:
+    - group: agentgateway.dev
+      kind: AgentgatewayBackend
+      name: copilot
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: copilot
+  namespace: copilot-proof
+spec:
+  ai:
+    provider:
+      copilot:
+        model: gpt-4o-mini
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: copilot-users
+  namespace: copilot-proof
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: copilot
+  traffic:
+    copilot:
+      clientId: Ov23liBhXifrbEyuGaF1
+      # Matches the documented HTTPS port-forward URL, including its port.
+      audience: https://copilot.local.test:8443
+      allowedUserIds: [25870869]
+      disableExpiry: true
+      # To impose a gateway deadline, replace disableExpiry with credentialTTL: 5m.
+      encryptionKeyRef:
+        name: copilot-encryption
+        key: key
+  backend:
+    auth:
+      copilotUser: {}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: health
+  namespace: copilot-proof
+spec:
+  parentRefs:
+  - name: copilot
+    sectionName: https
+  hostnames:
+  - copilot.local.test
+  rules:
+  - matches:
+    - path:
+        type: Exact
+        value: /health
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: health
+  namespace: copilot-proof
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: health
+  traffic:
+    directResponse:
+      status: 200
+      body: ok

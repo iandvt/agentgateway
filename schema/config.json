@@ -1964,6 +1964,17 @@
             }
           ]
         },
+        "copilot": {
+          "description": "Authenticate users with native GitHub login and encrypted Copilot credentials.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LocalCopilotConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "jwtAuth": {
           "description": "Authenticate incoming requests with JWT bearer tokens.",
           "anyOf": [
@@ -3175,6 +3186,11 @@
               "description": "Authenticate to GitHub Copilot.",
               "type": "string",
               "const": "copilot"
+            },
+            {
+              "description": "Use the credential verified by the selected Copilot traffic policy.",
+              "type": "string",
+              "const": "copilotUser"
             },
             {
               "description": "Sign a short-lived JWT with a private key on each request.",
@@ -4513,6 +4529,11 @@
           "description": "Authenticate to GitHub Copilot.",
           "type": "string",
           "const": "copilot"
+        },
+        {
+          "description": "Use the credential verified by the selected Copilot traffic policy.",
+          "type": "string",
+          "const": "copilotUser"
         },
         {
           "description": "Sign a short-lived JWT with a private key on each request.",
@@ -6250,6 +6271,50 @@
             "backend"
           ]
         }
+      ]
+    },
+    "LocalCopilotConfig": {
+      "type": "object",
+      "properties": {
+        "clientId": {
+          "type": "string"
+        },
+        "audience": {
+          "type": "string"
+        },
+        "allowedUserIds": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "credentialTTL": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "disableExpiry": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "encryptionKey": {
+          "description": "A protected file containing exactly 32 raw bytes. Inline keys are rejected.",
+          "$ref": "#/$defs/FileOrInline"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "clientId",
+        "audience",
+        "allowedUserIds",
+        "encryptionKey"
       ]
     },
     "LocalJwtConfig": {

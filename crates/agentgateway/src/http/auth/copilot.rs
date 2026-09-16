@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use ::http::HeaderValue;
 
+use super::BackendAuthError;
 use crate::http::Request;
 
 const TOKEN_ENV_VARS: &[&str] = &["GH_COPILOT_TOKEN", "COPILOT_GITHUB_TOKEN"];
@@ -9,6 +10,17 @@ const DOMAIN: &str = "github.com";
 
 pub(super) async fn insert_headers(req: &mut Request) -> anyhow::Result<()> {
 	let token = load_token().await?;
+	insert_token_headers(req, &token)
+}
+
+pub(super) fn insert_user_headers(req: &mut Request) -> Result<(), BackendAuthError> {
+	let token = crate::http::copilot::request_token(req)
+		.map_err(BackendAuthError::ClientCredential)?
+		.to_owned();
+	insert_token_headers(req, &token).map_err(BackendAuthError::local)
+}
+
+fn insert_token_headers(req: &mut Request, token: &str) -> anyhow::Result<()> {
 	let mut auth = HeaderValue::from_str(&format!("Bearer {token}"))?;
 	auth.set_sensitive(true);
 
@@ -140,6 +152,95 @@ fn extract_yaml_oauth_token(contents: &str, domain: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[tokio::test]
+	async fn copilot_expiry_between_authentication_and_dispatch_is_unauthorized() {
+		use std::time::{Duration, SystemTime};
+
+		use crate::http::auth::{self, BackendAuth, BackendAuthKind};
+		use crate::http::copilot::{CopilotConfig, CopilotPolicy};
+		use crate::proxy::ProxyResponseReason;
+		use crate::types::agent::{BackendTarget, Target};
+
+		let test = crate::test_helpers::proxymock::setup_proxy_test("{}").unwrap();
+		let info = auth::BackendInfo {
+			call_target: Target::Hostname("api.githubcopilot.com".into(), 443),
+			target: BackendTarget::Backend {
+				name: Default::default(),
+				namespace: Default::default(),
+				section: None,
+			},
+			inputs: test.inputs(),
+		};
+		let policy = CopilotPolicy::from_config(
+			CopilotConfig {
+				client_id: "synthetic-client".into(),
+				audience: "synthetic-gateway".into(),
+				allowed_user_ids: vec![1],
+				credential_ttl: None,
+				disable_expiry: Some(true),
+				policy_id: "synthetic-policy".into(),
+			},
+			&[7; 32],
+		)
+		.unwrap();
+		let issued_at = SystemTime::now();
+		let expires_at = issued_at + Duration::from_secs(1);
+		let credential = policy
+			.test_credential(1, "synthetic-upstream-token", issued_at, Some(expires_at))
+			.unwrap();
+		let mut req = ::http::Request::builder()
+			.uri("/v1/chat/completions")
+			.header("authorization", format!("Bearer {credential}"))
+			.body(crate::http::Body::empty())
+			.unwrap();
+		req
+			.extensions_mut()
+			.insert(crate::transport::stream::TLSConnectionInfo::default());
+		assert!(
+			policy
+				.authenticate(&mut req)
+				.await
+				.direct_response
+				.is_none()
+		);
+		let auth = BackendAuth::new(BackendAuthKind::CopilotUser { invalid: false });
+		auth::apply_backend_auth(&info, &auth, &mut req)
+			.await
+			.unwrap();
+		assert!(!req.headers().contains_key("authorization"));
+
+		// Exercise expiration between policy authentication and actual dispatch.
+		// Pure deadline boundary tests in http::copilot use a controlled clock.
+		tokio::time::sleep(
+			expires_at
+				.duration_since(SystemTime::now())
+				.unwrap_or_default(),
+		)
+		.await;
+		for error in [
+			auth::apply_backend_auth(&info, &auth, &mut req)
+				.await
+				.unwrap_err(),
+			auth::insert_copilot_user_headers(&mut req).unwrap_err(),
+		] {
+			let reason = error.as_reason();
+			assert_eq!(
+				error.into_response_with_grpc(false).status(),
+				::http::StatusCode::UNAUTHORIZED
+			);
+			assert_eq!(reason, ProxyResponseReason::Authorization);
+			assert!(!req.headers().contains_key("authorization"));
+		}
+		let invalid = BackendAuth::new(BackendAuthKind::CopilotUser { invalid: true });
+		let error = auth::apply_backend_auth(&info, &invalid, &mut req)
+			.await
+			.unwrap_err();
+		assert_eq!(
+			error.into_response_with_grpc(false).status(),
+			::http::StatusCode::INTERNAL_SERVER_ERROR
+		);
+	}
 
 	#[test]
 	fn json_token_extraction() {

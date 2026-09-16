@@ -2810,6 +2810,7 @@ pub enum TrafficPolicy {
 	ExtProc(RequestPolicy<ext_proc::ExtProc>),
 	JwtAuth(RequestPolicy<JwtAuthentication>),
 	Oidc(RequestPolicy<crate::http::oidc::OidcPolicy>),
+	Copilot(RequestPolicy<crate::http::copilot::CopilotPolicy>),
 	BasicAuth(RequestPolicy<crate::http::basicauth::BasicAuthentication>),
 	APIKey(RequestPolicy<crate::http::apikey::APIKeyAuthentication>),
 	Budget(RequestPolicy<crate::http::budget::BudgetPolicy>),

@@ -2519,6 +2519,18 @@ binds:
 }
 
 #[test]
+fn copilot_user_backend_auth_parses() {
+	use serde::de::IntoDeserializer;
+	let result = super::de_backend_auth::<serde_json::Value>(
+		serde_json::json!("copilotUser").into_deserializer(),
+	);
+	assert!(
+		result.is_ok(),
+		"per-user Copilot auth must parse: {result:?}"
+	);
+}
+
+#[test]
 fn test_de_backend_auth_accepts_each_shape() {
 	use serde::de::IntoDeserializer;
 
@@ -2624,4 +2636,41 @@ binds:
 		.await
 		.expect("a change to the key file should notify the resource manager")
 		.expect("resource change channel should stay open");
+}
+
+#[tokio::test]
+async fn copilot_rejects_pre_routing_policy() {
+	let mut key = tempfile::NamedTempFile::new().unwrap();
+	key.write_all(&[7; 32]).unwrap();
+	let error = normalize_test_policies(vec![super::LocalPolicy {
+		name: ResourceName::new("copilot".into(), "default".into()),
+		target: PolicyTarget::Gateway(ListenerTarget {
+			gateway_name: "name".into(),
+			gateway_namespace: "ns".into(),
+			listener_name: None,
+			port: None,
+		}),
+		phase: PolicyPhase::Gateway,
+		policy: super::FilterOrPolicy {
+			copilot: Some(http::copilot::LocalCopilotConfig {
+				client_id: "synthetic-client".into(),
+				audience: "https://copilot.test".into(),
+				allowed_user_ids: vec![1],
+				credential_ttl: None,
+				disable_expiry: Some(true),
+				encryption_key: crate::serdes::FileOrInline::File {
+					file: key.path().to_str().unwrap().into(),
+				},
+			}),
+			..Default::default()
+		},
+	}])
+	.await
+	.expect_err("pre-routing Copilot auth must not be ignored");
+	assert!(
+		error
+			.to_string()
+			.contains("Copilot authentication requires route phase"),
+		"{error}"
+	);
 }

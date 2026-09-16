@@ -55,6 +55,7 @@ type AgentgatewayBackendList struct {
 // +kubebuilder:validation:ExactlyOneOf=ai;static;dynamicForwardProxy;mcp;aws;a2a
 // +kubebuilder:validation:XValidation:rule="has(self.policies) && has(self.policies.ai) ? has(self.ai) : true",message="AI policies require AI backend"
 // +kubebuilder:validation:XValidation:rule="has(self.policies) && has(self.policies.mcp) ? has(self.mcp) : true",message="MCP policies require MCP backend"
+// +kubebuilder:validation:XValidation:rule="!has(self.policies) || !has(self.policies.auth) || !has(self.policies.auth.copilotUser) || (has(self.ai) && ((!has(self.ai.provider) || (has(self.ai.provider.copilot) && !has(self.ai.provider.host) && !has(self.ai.provider.port) && !has(self.ai.provider.path) && !has(self.ai.provider.pathPrefix))) && (!has(self.ai.groups) || self.ai.groups.all(g, g.providers.all(p, has(p.copilot) && !has(p.host) && !has(p.port) && !has(p.path) && !has(p.pathPrefix))))) )",message="copilotUser requires the Copilot provider without endpoint overrides"
 type AgentgatewayBackendSpec struct {
 	// Static hostname, IP address, or Unix Domain Socket backend.
 	// +optional
@@ -195,6 +196,7 @@ type PriorityGroup struct {
 	Providers []NamedLLMProvider `json:"providers"`
 }
 
+// +kubebuilder:validation:XValidation:rule="!has(self.policies) || !has(self.policies.auth) || !has(self.policies.auth.copilotUser) || (has(self.copilot) && !has(self.host) && !has(self.port) && !has(self.path) && !has(self.pathPrefix))",message="copilotUser requires the Copilot provider without endpoint overrides"
 type NamedLLMProvider struct {
 	// Name of the provider. Policies can target this provider by name.
 	// +required
@@ -212,13 +214,17 @@ type NamedLLMProvider struct {
 }
 
 // Large language model provider that the backend routes requests to.
-// +kubebuilder:validation:ExactlyOneOf=openai;azureopenai;azure;anthropic;gemini;vertexai;bedrock;custom
+// +kubebuilder:validation:ExactlyOneOf=openai;azureopenai;azure;anthropic;gemini;vertexai;bedrock;custom;copilot
 // +kubebuilder:validation:XValidation:rule="has(self.host) || has(self.port) ? has(self.host) && has(self.port) : true",message="both host and port must be set together"
 // +kubebuilder:validation:XValidation:rule="has(self.custom) ? has(self.custom.backendRef) != has(self.host) : true",message="custom providers must specify exactly one of backendRef or host and port"
 // +kubebuilder:validation:XValidation:rule="!(has(self.path) && has(self.pathPrefix))",message="path and pathPrefix are mutually exclusive"
 // +kubebuilder:validation:XValidation:rule="!(has(self.custom) && self.custom.formats.exists(f, has(f.path)) && (has(self.path) || has(self.pathPrefix)))",message="path, pathPrefix, and custom format paths are mutually exclusive"
 // +kubebuilder:validation:XValidation:rule="has(self.pathPrefix) ? has(self.host) : true",message="pathPrefix requires host to be set"
 type LLMProvider struct {
+	// GitHub Copilot provider settings.
+	// +optional
+	Copilot *CopilotConfig `json:"copilot,omitempty"`
+
 	// OpenAI provider settings.
 	// +optional
 	OpenAI *OpenAIConfig `json:"openai,omitempty"`
@@ -279,6 +285,13 @@ type LLMProvider struct {
 	// Only supported for OpenAI and Anthropic providers.
 	// +optional
 	PathPrefix LongString `json:"pathPrefix,omitempty"`
+}
+
+// CopilotConfig configures the GitHub Copilot provider.
+type CopilotConfig struct {
+	// Model to use for requests. When omitted, use the requested model.
+	// +optional
+	Model *string `json:"model,omitempty"`
 }
 
 // References a namespace-local backend resource.

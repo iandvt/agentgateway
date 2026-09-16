@@ -236,6 +236,14 @@ spec:
                                     pattern: ^[a-z0-9-]+$
                                     type: string
                                 type: object
+                              copilot:
+                                description: GitHub Copilot provider settings.
+                                properties:
+                                  model:
+                                    description: Model to use for requests. When omitted,
+                                      use the requested model.
+                                    type: string
+                                type: object
                               custom:
                                 description: |-
                                   Custom provider configures a non-managed or self-hosted LLM provider.
@@ -4684,6 +4692,10 @@ spec:
                                             be set
                                           rule: (has(self.secretRef)?1:0)+(has(self.managedIdentity)?1:0)+(has(self.workloadIdentity)?1:0)
                                             <= 1
+                                      copilotUser:
+                                        description: Uses only the verified credential
+                                          from traffic.copilot.
+                                        type: object
                                       credentials:
                                         description: |-
                                           Credentials is a list of additional credentials to inject on the
@@ -6399,23 +6411,27 @@ spec:
                                     type: object
                                     x-kubernetes-validations:
                                     - message: must specify credentials, or at most
-                                        one of key/secretRef/passthrough/aws/azure/gcp/oauthTokenExchange/crossAppAccess/jwtSign
+                                        one of key/secretRef/passthrough/aws/azure/gcp/oauthTokenExchange/crossAppAccess/jwtSign/copilotUser
                                         (credentials may be combined with a primary
                                         auth kind)
                                       rule: has(self.credentials) || has(self.key)
                                         || has(self.secretRef) || has(self.passthrough)
                                         || has(self.aws) || has(self.azure) || has(self.gcp)
                                         || has(self.oauthTokenExchange) || has(self.crossAppAccess)
-                                        || has(self.jwtSign)
+                                        || has(self.jwtSign) || has(self.copilotUser)
                                     - message: location may only be set for key, secretRef,
                                         or passthrough auth
                                       rule: 'has(self.location) ? has(self.key) ||
                                         has(self.secretRef) || has(self.passthrough)
                                         : true'
+                                    - message: copilotUser may not be combined with
+                                        credentials
+                                      rule: '!has(self.copilotUser) || !has(self.credentials)'
                                     - message: at most one of the fields in [key secretRef
                                         passthrough aws azure gcp oauthTokenExchange
-                                        crossAppAccess jwtSign] may be set
-                                      rule: (has(self.key)?1:0)+(has(self.secretRef)?1:0)+(has(self.passthrough)?1:0)+(has(self.aws)?1:0)+(has(self.azure)?1:0)+(has(self.gcp)?1:0)+(has(self.oauthTokenExchange)?1:0)+(has(self.crossAppAccess)?1:0)+(has(self.jwtSign)?1:0)
+                                        crossAppAccess jwtSign copilotUser] may be
+                                        set
+                                      rule: (has(self.key)?1:0)+(has(self.secretRef)?1:0)+(has(self.passthrough)?1:0)+(has(self.aws)?1:0)+(has(self.azure)?1:0)+(has(self.gcp)?1:0)+(has(self.oauthTokenExchange)?1:0)+(has(self.crossAppAccess)?1:0)+(has(self.jwtSign)?1:0)+(has(self.copilotUser)?1:0)
                                         <= 1
                                   health:
                                     description: Settings for passive and active health
@@ -7129,6 +7145,12 @@ spec:
                             - name
                             type: object
                             x-kubernetes-validations:
+                            - message: copilotUser requires the Copilot provider without
+                                endpoint overrides
+                              rule: '!has(self.policies) || !has(self.policies.auth)
+                                || !has(self.policies.auth.copilotUser) || (has(self.copilot)
+                                && !has(self.host) && !has(self.port) && !has(self.path)
+                                && !has(self.pathPrefix))'
                             - message: both host and port must be set together
                               rule: 'has(self.host) || has(self.port) ? has(self.host)
                                 && has(self.port) : true'
@@ -7145,9 +7167,9 @@ spec:
                             - message: pathPrefix requires host to be set
                               rule: 'has(self.pathPrefix) ? has(self.host) : true'
                             - message: exactly one of the fields in [openai azureopenai
-                                azure anthropic gemini vertexai bedrock custom] must
-                                be set
-                              rule: (has(self.openai)?1:0)+(has(self.azureopenai)?1:0)+(has(self.azure)?1:0)+(has(self.anthropic)?1:0)+(has(self.gemini)?1:0)+(has(self.vertexai)?1:0)+(has(self.bedrock)?1:0)+(has(self.custom)?1:0)
+                                azure anthropic gemini vertexai bedrock custom copilot]
+                                must be set
+                              rule: (has(self.openai)?1:0)+(has(self.azureopenai)?1:0)+(has(self.azure)?1:0)+(has(self.anthropic)?1:0)+(has(self.gemini)?1:0)+(has(self.vertexai)?1:0)+(has(self.bedrock)?1:0)+(has(self.custom)?1:0)+(has(self.copilot)?1:0)
                                 == 1
                           maxItems: 16
                           minItems: 1
@@ -7303,6 +7325,14 @@ spec:
                             maxLength: 63
                             minLength: 1
                             pattern: ^[a-z0-9-]+$
+                            type: string
+                        type: object
+                      copilot:
+                        description: GitHub Copilot provider settings.
+                        properties:
+                          model:
+                            description: Model to use for requests. When omitted,
+                              use the requested model.
                             type: string
                         type: object
                       custom:
@@ -7563,8 +7593,9 @@ spec:
                     - message: pathPrefix requires host to be set
                       rule: 'has(self.pathPrefix) ? has(self.host) : true'
                     - message: exactly one of the fields in [openai azureopenai azure
-                        anthropic gemini vertexai bedrock custom] must be set
-                      rule: (has(self.openai)?1:0)+(has(self.azureopenai)?1:0)+(has(self.azure)?1:0)+(has(self.anthropic)?1:0)+(has(self.gemini)?1:0)+(has(self.vertexai)?1:0)+(has(self.bedrock)?1:0)+(has(self.custom)?1:0)
+                        anthropic gemini vertexai bedrock custom copilot] must be
+                        set
+                      rule: (has(self.openai)?1:0)+(has(self.azureopenai)?1:0)+(has(self.azure)?1:0)+(has(self.anthropic)?1:0)+(has(self.gemini)?1:0)+(has(self.vertexai)?1:0)+(has(self.bedrock)?1:0)+(has(self.custom)?1:0)+(has(self.copilot)?1:0)
                         == 1
                 type: object
                 x-kubernetes-validations:
@@ -8019,6 +8050,10 @@ spec:
                                           set
                                         rule: (has(self.secretRef)?1:0)+(has(self.managedIdentity)?1:0)+(has(self.workloadIdentity)?1:0)
                                           <= 1
+                                    copilotUser:
+                                      description: Uses only the verified credential
+                                        from traffic.copilot.
+                                      type: object
                                     credentials:
                                       description: |-
                                         Credentials is a list of additional credentials to inject on the
@@ -9698,22 +9733,25 @@ spec:
                                   type: object
                                   x-kubernetes-validations:
                                   - message: must specify credentials, or at most
-                                      one of key/secretRef/passthrough/aws/azure/gcp/oauthTokenExchange/crossAppAccess/jwtSign
+                                      one of key/secretRef/passthrough/aws/azure/gcp/oauthTokenExchange/crossAppAccess/jwtSign/copilotUser
                                       (credentials may be combined with a primary
                                       auth kind)
                                     rule: has(self.credentials) || has(self.key) ||
                                       has(self.secretRef) || has(self.passthrough)
                                       || has(self.aws) || has(self.azure) || has(self.gcp)
                                       || has(self.oauthTokenExchange) || has(self.crossAppAccess)
-                                      || has(self.jwtSign)
+                                      || has(self.jwtSign) || has(self.copilotUser)
                                   - message: location may only be set for key, secretRef,
                                       or passthrough auth
                                     rule: 'has(self.location) ? has(self.key) || has(self.secretRef)
                                       || has(self.passthrough) : true'
+                                  - message: copilotUser may not be combined with
+                                      credentials
+                                    rule: '!has(self.copilotUser) || !has(self.credentials)'
                                   - message: at most one of the fields in [key secretRef
                                       passthrough aws azure gcp oauthTokenExchange
-                                      crossAppAccess jwtSign] may be set
-                                    rule: (has(self.key)?1:0)+(has(self.secretRef)?1:0)+(has(self.passthrough)?1:0)+(has(self.aws)?1:0)+(has(self.azure)?1:0)+(has(self.gcp)?1:0)+(has(self.oauthTokenExchange)?1:0)+(has(self.crossAppAccess)?1:0)+(has(self.jwtSign)?1:0)
+                                      crossAppAccess jwtSign copilotUser] may be set
+                                    rule: (has(self.key)?1:0)+(has(self.secretRef)?1:0)+(has(self.passthrough)?1:0)+(has(self.aws)?1:0)+(has(self.azure)?1:0)+(has(self.gcp)?1:0)+(has(self.oauthTokenExchange)?1:0)+(has(self.crossAppAccess)?1:0)+(has(self.jwtSign)?1:0)+(has(self.copilotUser)?1:0)
                                       <= 1
                                 http:
                                   description: Settings for managing HTTP requests
@@ -13793,6 +13831,9 @@ spec:
                             workloadIdentity] may be set
                           rule: (has(self.secretRef)?1:0)+(has(self.managedIdentity)?1:0)+(has(self.workloadIdentity)?1:0)
                             <= 1
+                      copilotUser:
+                        description: Uses only the verified credential from traffic.copilot.
+                        type: object
                       credentials:
                         description: |-
                           Credentials is a list of additional credentials to inject on the
@@ -15317,20 +15358,22 @@ spec:
                             (has(self.kind) && size(self.kind) > 0)'
                     type: object
                     x-kubernetes-validations:
-                    - message: must specify credentials, or at most one of key/secretRef/passthrough/aws/azure/gcp/oauthTokenExchange/crossAppAccess/jwtSign
+                    - message: must specify credentials, or at most one of key/secretRef/passthrough/aws/azure/gcp/oauthTokenExchange/crossAppAccess/jwtSign/copilotUser
                         (credentials may be combined with a primary auth kind)
                       rule: has(self.credentials) || has(self.key) || has(self.secretRef)
                         || has(self.passthrough) || has(self.aws) || has(self.azure)
                         || has(self.gcp) || has(self.oauthTokenExchange) || has(self.crossAppAccess)
-                        || has(self.jwtSign)
+                        || has(self.jwtSign) || has(self.copilotUser)
                     - message: location may only be set for key, secretRef, or passthrough
                         auth
                       rule: 'has(self.location) ? has(self.key) || has(self.secretRef)
                         || has(self.passthrough) : true'
+                    - message: copilotUser may not be combined with credentials
+                      rule: '!has(self.copilotUser) || !has(self.credentials)'
                     - message: at most one of the fields in [key secretRef passthrough
-                        aws azure gcp oauthTokenExchange crossAppAccess jwtSign] may
-                        be set
-                      rule: (has(self.key)?1:0)+(has(self.secretRef)?1:0)+(has(self.passthrough)?1:0)+(has(self.aws)?1:0)+(has(self.azure)?1:0)+(has(self.gcp)?1:0)+(has(self.oauthTokenExchange)?1:0)+(has(self.crossAppAccess)?1:0)+(has(self.jwtSign)?1:0)
+                        aws azure gcp oauthTokenExchange crossAppAccess jwtSign copilotUser]
+                        may be set
+                      rule: (has(self.key)?1:0)+(has(self.secretRef)?1:0)+(has(self.passthrough)?1:0)+(has(self.aws)?1:0)+(has(self.azure)?1:0)+(has(self.gcp)?1:0)+(has(self.oauthTokenExchange)?1:0)+(has(self.crossAppAccess)?1:0)+(has(self.jwtSign)?1:0)+(has(self.copilotUser)?1:0)
                         <= 1
                   extAuth:
                     description: |-
@@ -16742,6 +16785,14 @@ spec:
             - message: MCP policies require MCP backend
               rule: 'has(self.policies) && has(self.policies.mcp) ? has(self.mcp)
                 : true'
+            - message: copilotUser requires the Copilot provider without endpoint
+                overrides
+              rule: '!has(self.policies) || !has(self.policies.auth) || !has(self.policies.auth.copilotUser)
+                || (has(self.ai) && ((!has(self.ai.provider) || (has(self.ai.provider.copilot)
+                && !has(self.ai.provider.host) && !has(self.ai.provider.port) && !has(self.ai.provider.path)
+                && !has(self.ai.provider.pathPrefix))) && (!has(self.ai.groups) ||
+                self.ai.groups.all(g, g.providers.all(p, has(p.copilot) && !has(p.host)
+                && !has(p.port) && !has(p.path) && !has(p.pathPrefix))))) )'
             - message: exactly one of the fields in [ai static dynamicForwardProxy
                 mcp aws a2a] must be set
               rule: (has(self.ai)?1:0)+(has(self.static)?1:0)+(has(self.dynamicForwardProxy)?1:0)+(has(self.mcp)?1:0)+(has(self.aws)?1:0)+(has(self.a2a)?1:0)

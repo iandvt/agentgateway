@@ -166,3 +166,18 @@ spec:
   policies:
     auth:
       crossAppAccess: {}
+
+---
+_err: copilotUser requires the Copilot provider without endpoint overrides
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayModel
+metadata:
+  name: copilot-endpoint-override-132
+spec:
+  parentRefs:
+  - name: ai-gateway
+  provider: Copilot
+  baseURL: https://custom.example
+  policies:
+    auth:
+      copilotUser: {}

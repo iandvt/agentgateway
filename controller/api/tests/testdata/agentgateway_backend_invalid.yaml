@@ -293,3 +293,48 @@ spec:
           name: other-backend
         formats:
         - type: Completions
+
+---
+_err: exactly one
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: copilot-conflicting-provider
+spec:
+  ai:
+    provider:
+      copilot: {}
+      openai: {}
+
+---
+_err: copilotUser requires the Copilot provider without endpoint overrides
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: copilot-endpoint-override-124
+spec:
+  ai:
+    provider:
+      copilot: {}
+      host: custom.example
+      port: 443
+  policies:
+    auth:
+      copilotUser: {}
+
+---
+_err: copilotUser requires the Copilot provider without endpoint overrides
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: copilot-endpoint-override-160
+spec:
+  ai:
+    groups:
+    - providers:
+      - name: copilot
+        copilot: {}
+        path: /custom
+        policies:
+          auth:
+            copilotUser: {}

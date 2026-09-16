@@ -2394,6 +2394,10 @@ impl LocalBackendAuth {
 		self,
 		resources: &crate::resource_manager::ResourceFetcher,
 	) -> anyhow::Result<BackendAuth> {
+		if matches!(self.kind, Some(LocalBackendAuthKind::CopilotUser)) && !self.credentials.is_empty()
+		{
+			bail!("copilotUser cannot be combined with additional credentials");
+		}
 		let kind = match self.kind {
 			Some(LocalBackendAuthKind::Passthrough { location }) => {
 				Some(BackendAuthKind::Passthrough { location })
@@ -2406,6 +2410,9 @@ impl LocalBackendAuth {
 			Some(LocalBackendAuthKind::Aws(auth)) => Some(BackendAuthKind::Aws(auth)),
 			Some(LocalBackendAuthKind::Azure(auth)) => Some(BackendAuthKind::Azure(auth)),
 			Some(LocalBackendAuthKind::Copilot) => Some(BackendAuthKind::Copilot),
+			Some(LocalBackendAuthKind::CopilotUser) => {
+				Some(BackendAuthKind::CopilotUser { invalid: false })
+			},
 			Some(LocalBackendAuthKind::JwtSign(auth)) => Some(BackendAuthKind::JwtSign(Box::new(
 				(*auth).try_into(resources).await?,
 			))),
@@ -2472,6 +2479,9 @@ enum LocalBackendAuthKind {
 	/// Authenticate to GitHub Copilot.
 	#[serde(rename = "copilot")]
 	Copilot,
+	/// Use the credential verified by the selected Copilot traffic policy.
+	#[serde(rename = "copilotUser")]
+	CopilotUser,
 	/// Sign a short-lived JWT with a private key on each request.
 	#[serde(rename = "jwtSign")]
 	JwtSign(Box<LocalJwtSignAuth>),
@@ -3002,6 +3012,9 @@ pub struct FilterOrPolicy {
 	/// Remote rate limit checks for incoming requests.
 	#[serde(default)]
 	remote_rate_limit: Option<LocalRemoteRateLimitPolicy>,
+	/// Authenticate users with native GitHub login and encrypted Copilot credentials.
+	#[serde(default)]
+	copilot: Option<crate::http::copilot::LocalCopilotConfig>,
 	/// Authenticate incoming requests with JWT bearer tokens.
 	#[serde(default)]
 	jwt_auth: Option<crate::http::jwt::LocalJwtConfig>,
@@ -3177,6 +3190,9 @@ async fn convert(
 	}
 
 	for p in policies {
+		if p.policy.copilot.is_some() && p.phase == PolicyPhase::Gateway {
+			bail!("Copilot authentication requires route phase");
+		}
 		p.target.validate()?;
 		let policy_key = p.name.to_string();
 		let backend_target = matches!(p.target, PolicyTarget::Backend(_));
@@ -5321,6 +5337,7 @@ pub(crate) async fn split_policies_for_target(
 		local_rate_limit,
 		remote_rate_limit,
 		jwt_auth,
+		copilot,
 		oidc: oidc_config,
 		basic_auth,
 		api_key,
@@ -5430,6 +5447,19 @@ pub(crate) async fn split_policies_for_target(
 				jwt: p.try_into(resources).await?,
 				mcp: None,
 			},
+		)));
+	}
+	if let Some(copilot) = copilot {
+		let context = attached
+			.as_ref()
+			.ok_or_else(|| Error::msg("copilot policies must be attached"))?;
+		if backend_target {
+			bail!("copilot is a traffic policy and cannot target a backend");
+		}
+		route_policies.push(TrafficPolicy::Copilot(RequestPolicy::single(
+			copilot
+				.compile(resources, context.oidc_policy_id.as_str().to_owned())
+				.await?,
 		)));
 	}
 	let compiled_oidc = if let Some(oidc) = oidc_config {

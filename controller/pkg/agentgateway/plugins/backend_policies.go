@@ -923,13 +923,34 @@ func translateBackendAI(ctx PolicyCtx, agwPolicy *agentgateway.AgentgatewayPolic
 	return aiPolicy, errors.Join(errs...)
 }
 
+// ValidateCopilotUserProvider rejects endpoint overrides wherever the provider and
+// its backend authentication configuration are available together.
+func ValidateCopilotUserProvider(provider *api.AIBackend_Provider, inherited []*api.BackendPolicySpec) error {
+	for _, policies := range [][]*api.BackendPolicySpec{inherited, provider.InlinePolicies} {
+		for _, policy := range policies {
+			if policy.GetAuth().GetCopilotUser() != nil && (provider.GetCopilot() == nil || provider.HostOverride != nil || provider.PathOverride != nil || provider.PathPrefix != nil || provider.BaseUrl != nil || provider.ProviderBackend != nil) {
+				return errors.New("copilotUser requires the Copilot provider without endpoint overrides")
+			}
+		}
+	}
+	return nil
+}
+
 func translateBackendAuth(ctx PolicyCtx, policy *agentgateway.AgentgatewayPolicy, name string) (*api.Policy, error) {
 	var errs []error
 	auth := policy.Spec.Backend.Auth
 
 	var translatedAuth *api.BackendAuthPolicy
 	var kindErrs []error
-	if auth.InlineKey != nil && *auth.InlineKey != "" {
+	if auth.CopilotUser != nil {
+		copilot := &api.CopilotUserAuth{}
+		if auth.InlineKey != nil || auth.SecretRef != nil || auth.Passthrough != nil || auth.AWS != nil || auth.Azure != nil || auth.GCP != nil || auth.OAuthTokenExchange != nil || auth.CrossAppAccess != nil || auth.JwtSign != nil || auth.Location != nil || len(auth.Credentials) != 0 {
+			err := errors.New("copilotUser may not be combined with other authentication, credentials, or location")
+			errs = append(errs, err)
+			copilot.TranslationError = new(err.Error())
+		}
+		translatedAuth = &api.BackendAuthPolicy{Kind: &api.BackendAuthPolicy_CopilotUser{CopilotUser: copilot}}
+	} else if auth.InlineKey != nil && *auth.InlineKey != "" {
 		translatedAuth = &api.BackendAuthPolicy{
 			Kind: &api.BackendAuthPolicy_Key{
 				Key: &api.Key{
@@ -1031,13 +1052,15 @@ func translateBackendAuth(ctx PolicyCtx, policy *agentgateway.AgentgatewayPolicy
 		}
 	}
 
-	translatedCredentials, credErrs := translateBackendAuthCredentials(ctx, auth.Credentials, policy.Namespace)
-	errs = append(errs, credErrs...)
-	if len(translatedCredentials) > 0 {
-		if translatedAuth == nil {
-			translatedAuth = &api.BackendAuthPolicy{}
+	if auth.CopilotUser == nil {
+		translatedCredentials, credErrs := translateBackendAuthCredentials(ctx, auth.Credentials, policy.Namespace)
+		errs = append(errs, credErrs...)
+		if len(translatedCredentials) > 0 {
+			if translatedAuth == nil {
+				translatedAuth = &api.BackendAuthPolicy{}
+			}
+			translatedAuth.Credentials = translatedCredentials
 		}
-		translatedAuth.Credentials = translatedCredentials
 	}
 
 	if translatedAuth == nil {

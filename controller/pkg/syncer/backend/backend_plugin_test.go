@@ -317,6 +317,39 @@ func TestBuildMCP(t *testing.T) {
 	}
 }
 
+func TestBuildAIBackendCopilot(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		spec  string
+		model *string
+	}{
+		{"default", `ai: {provider: {copilot: {}}}`, nil},
+		{"model", `ai: {provider: {copilot: {model: gpt-4o-mini}}}`, new("gpt-4o-mini")},
+		{"user auth", `ai: {provider: {copilot: {}}}
+policies: {auth: {copilotUser: {}}}`, nil},
+		{"multipool", `ai: {groups: [{providers: [{name: copilot, copilot: {model: gpt-4o-mini}}]}]}`, new("gpt-4o-mini")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := &agentgateway.AgentgatewayBackend{Name: "copilot", Namespace: "default"}
+			if err := yaml.Unmarshal([]byte(tc.spec), &backend.Spec); err != nil {
+				t.Fatal(err)
+			}
+			result, err := agentgatewaybackend.BuildAgwBackend(testutils.BuildMockPolicyContext(t, nil), backend)
+			if err != nil || len(result) != 1 {
+				t.Fatalf("Copilot translation: backends=%d, err=%v", len(result), err)
+			}
+			groups := result[0].GetAi().GetProviderGroups()
+			if len(groups) != 1 || len(groups[0].GetProviders()) != 1 {
+				t.Fatal("expected one Copilot provider")
+			}
+			copilot := groups[0].Providers[0].GetCopilot()
+			if copilot == nil || (copilot.Model == nil) != (tc.model == nil) || (tc.model != nil && copilot.GetModel() != *tc.model) {
+				t.Fatalf("unexpected Copilot model: %v", copilot)
+			}
+		})
+	}
+}
+
 func TestBuildAIBackend(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1266,4 +1299,31 @@ type jsonMarshalProto struct {
 
 func (p jsonMarshalProto) MarshalJSON() ([]byte, error) {
 	return protomarshal.Marshal(p.Message)
+}
+
+func TestBuildAIBackendCopilotUserRejectsEndpointOverrides(t *testing.T) {
+	for _, spec := range []string{
+		`static: {host: api.githubcopilot.com, port: 443}
+policies: {auth: {copilotUser: {}}}`,
+		`ai: {provider: {copilot: {}, host: custom.example, port: 443}}
+policies: {auth: {copilotUser: {}}}`,
+		`ai: {provider: {copilot: {}, path: /custom}}
+policies: {auth: {copilotUser: {}}}`,
+		`ai: {provider: {openai: {}}}
+policies: {auth: {copilotUser: {}}}`,
+		`ai: {groups: [{providers: [{name: copilot, copilot: {}, host: custom.example, port: 443}]}]}
+policies: {auth: {copilotUser: {}}}`,
+		`ai: {groups: [{providers: [{name: copilot, copilot: {}, host: custom.example, port: 443, policies: {auth: {copilotUser: {}}}}]}]}`,
+	} {
+		t.Run(spec, func(t *testing.T) {
+			backend := &agentgateway.AgentgatewayBackend{Name: "copilot", Namespace: "default"}
+			if err := yaml.Unmarshal([]byte(spec), &backend.Spec); err != nil {
+				t.Fatal(err)
+			}
+			_, err := agentgatewaybackend.BuildAgwBackend(testutils.BuildMockPolicyContext(t, nil), backend)
+			if err == nil || !strings.Contains(err.Error(), "copilotUser requires the Copilot provider without endpoint overrides") {
+				t.Fatalf("expected prohibited target error: %v", err)
+			}
+		})
+	}
 }

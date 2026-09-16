@@ -99,6 +99,12 @@ pub enum BackendAuthKind {
 	/// Authenticate to GitHub Copilot.
 	#[serde(rename = "copilot")]
 	Copilot,
+	/// Use the credential verified by the selected Copilot traffic policy.
+	#[serde(rename = "copilotUser")]
+	CopilotUser {
+		#[serde(skip_serializing_if = "std::ops::Not::not")]
+		invalid: bool,
+	},
 	/// Sign a short-lived JWT with a private key on each request.
 	#[serde(rename = "jwtSign")]
 	JwtSign(Box<jwt_sign::JwtSignAuth>),
@@ -123,6 +129,8 @@ pub struct BackendAuth {
 pub enum BackendAuthError {
 	#[error(transparent)]
 	Local(anyhow::Error),
+	#[error(transparent)]
+	ClientCredential(anyhow::Error),
 	#[error(transparent)]
 	CredentialProvider(anyhow::Error),
 }
@@ -216,6 +224,25 @@ pub async fn apply_backend_auth(
 	auth: &BackendAuth,
 	req: &mut Request,
 ) -> Result<(), ProxyError> {
+	if crate::http::copilot::has_verified(req)
+		&& !matches!(
+			auth.kind,
+			Some(BackendAuthKind::CopilotUser { invalid: false })
+		) {
+		return Err(ProxyError::BackendAuthenticationFailed(
+			crate::http::auth::BackendAuthError::local(anyhow::anyhow!(
+				"Copilot user requests require copilotUser backend authentication"
+			)),
+		));
+	}
+	if matches!(auth.kind, Some(BackendAuthKind::CopilotUser { .. })) && !auth.credentials.is_empty()
+	{
+		return Err(ProxyError::BackendAuthenticationFailed(
+			crate::http::auth::BackendAuthError::local(anyhow::anyhow!(
+				"copilotUser cannot be combined with additional credentials"
+			)),
+		));
+	}
 	if let Some(kind) = auth.kind.as_ref() {
 		apply_backend_auth_kind(backend_info, kind, req).await?;
 	}
@@ -295,6 +322,15 @@ async fn apply_backend_auth_kind(
 				.await
 				.map_err(BackendAuthError::local)?;
 		},
+		BackendAuthKind::CopilotUser { invalid } => {
+			if *invalid {
+				return Err(
+					BackendAuthError::local(anyhow::anyhow!("invalid Copilot user authentication")).into(),
+				);
+			}
+			// Insert the token only after request transformations and destination validation.
+			crate::http::copilot::request_token(req).map_err(BackendAuthError::ClientCredential)?;
+		},
 		BackendAuthKind::JwtSign(cfg) => {
 			let token = cfg.sign().map_err(BackendAuthError::local)?;
 			let explicit = cfg.location().is_some();
@@ -335,6 +371,10 @@ pub async fn apply_late_backend_auth(
 	aws::sign_request(req, aws_auth)
 		.await
 		.map_err(ProxyError::BackendAuthenticationFailed)
+}
+
+pub(crate) fn insert_copilot_user_headers(req: &mut Request) -> Result<(), ProxyError> {
+	copilot::insert_user_headers(req).map_err(ProxyError::BackendAuthenticationFailed)
 }
 
 #[apply(schema!)]

@@ -151,6 +151,9 @@ func BuildAgwBackend(
 	ctx plugins.PolicyCtx,
 	backend *agentgateway.AgentgatewayBackend,
 ) ([]*api.Backend, error) {
+	if backend.Spec.AI == nil && backend.Spec.Policies != nil && backend.Spec.Policies.Auth != nil && backend.Spec.Policies.Auth.CopilotUser != nil {
+		return nil, errors.New("copilotUser requires the Copilot provider without endpoint overrides")
+	}
 	errs := []error{}
 	pols, err := TranslateBackendPolicies(ctx, backend.Namespace, backend.Spec.Policies)
 	if err != nil {
@@ -435,6 +438,14 @@ func translateAIBackends(ctx plugins.PolicyCtx, be *agentgateway.AgentgatewayBac
 		}
 	}
 
+	for _, group := range aiBackend.ProviderGroups {
+		for _, provider := range group.Providers {
+			if err := plugins.ValidateCopilotUserProvider(provider, inlinePolicies); err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	backendName := utils.InternalBackendKey(be.Namespace, be.Name, "")
 	backend := &api.Backend{
 		Key:  backendName,
@@ -495,7 +506,9 @@ func translateLLMProvider(ctx plugins.PolicyCtx, namespace string, llm *agentgat
 	}
 
 	// Extract auth token and model based on provider
-	if llm.OpenAI != nil {
+	if llm.Copilot != nil {
+		provider.Provider = &api.AIBackend_Provider_Copilot{Copilot: &api.AIBackend_Copilot{Model: llm.Copilot.Model}}
+	} else if llm.OpenAI != nil {
 		moderation, err := translateOpenAIInlineModeration(llm.OpenAI.Moderation)
 		if err != nil {
 			return nil, err

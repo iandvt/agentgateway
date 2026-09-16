@@ -89,7 +89,10 @@ impl ProxyError {
 			ProxyError::MCP(_) => ProxyResponseReason::MCP,
 			ProxyError::AuthorizationFailed
 			| ProxyError::SubstrateEgressDenied(_)
-			| ProxyError::CsrfValidationFailed => ProxyResponseReason::Authorization,
+			| ProxyError::CsrfValidationFailed
+			| ProxyError::BackendAuthenticationFailed(http::auth::BackendAuthError::ClientCredential(
+				_,
+			)) => ProxyResponseReason::Authorization,
 			ProxyError::BackendAuthenticationFailed(http::auth::BackendAuthError::Local(_)) => {
 				ProxyResponseReason::Internal
 			},
@@ -389,6 +392,7 @@ impl ProxyError {
 			ProxyError::ServiceNotFound => StatusCode::INTERNAL_SERVER_ERROR,
 			ProxyError::BackendAuthenticationFailed(ref error) => match error {
 				http::auth::BackendAuthError::Local(_) => StatusCode::INTERNAL_SERVER_ERROR,
+				http::auth::BackendAuthError::ClientCredential(_) => StatusCode::UNAUTHORIZED,
 				http::auth::BackendAuthError::CredentialProvider(_) => StatusCode::BAD_GATEWAY,
 			},
 			ProxyError::InvalidBackendType => StatusCode::INTERNAL_SERVER_ERROR,
@@ -791,6 +795,11 @@ mod tests {
 				"local authentication failed"
 			)))
 		};
+		let make_client_error = || {
+			ProxyError::BackendAuthenticationFailed(http::auth::BackendAuthError::ClientCredential(
+				anyhow::anyhow!("expired credential"),
+			))
+		};
 		let make_error = || {
 			ProxyError::BackendAuthenticationFailed(http::auth::BackendAuthError::CredentialProvider(
 				anyhow::anyhow!("credential provider failed"),
@@ -808,6 +817,18 @@ mod tests {
 		let grpc_response = make_local_error().into_response_with_grpc(true);
 		assert_eq!(grpc_response.status(), StatusCode::OK);
 		assert_eq!(grpc_response.headers()["grpc-status"], "2");
+
+		assert_eq!(
+			make_client_error().as_reason(),
+			ProxyResponseReason::Authorization
+		);
+		assert_eq!(
+			make_client_error().into_response_with_grpc(false).status(),
+			StatusCode::UNAUTHORIZED
+		);
+		let grpc_response = make_client_error().into_response_with_grpc(true);
+		assert_eq!(grpc_response.status(), StatusCode::OK);
+		assert_eq!(grpc_response.headers()["grpc-status"], "16");
 
 		assert_eq!(
 			ProxyResponse::Error(make_error()).as_reason(),

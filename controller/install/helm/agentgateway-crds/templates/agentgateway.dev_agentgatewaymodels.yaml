@@ -567,6 +567,9 @@ spec:
                             workloadIdentity] may be set
                           rule: (has(self.secretRef)?1:0)+(has(self.managedIdentity)?1:0)+(has(self.workloadIdentity)?1:0)
                             <= 1
+                      copilotUser:
+                        description: Uses only the verified credential from traffic.copilot.
+                        type: object
                       credentials:
                         description: |-
                           Credentials is a list of additional credentials to inject on the backend
@@ -1342,18 +1345,20 @@ spec:
                             (has(self.kind) && size(self.kind) > 0)'
                     type: object
                     x-kubernetes-validations:
-                    - message: must specify credentials, or at most one of key/secretRef/passthrough/aws/azure/gcp/oauthTokenExchange
+                    - message: must specify credentials, or at most one of key/secretRef/passthrough/aws/azure/gcp/oauthTokenExchange/copilotUser
                         (credentials may be combined with a primary auth kind)
                       rule: has(self.credentials) || has(self.key) || has(self.secretRef)
                         || has(self.passthrough) || has(self.aws) || has(self.azure)
-                        || has(self.gcp) || has(self.oauthTokenExchange)
+                        || has(self.gcp) || has(self.oauthTokenExchange) || has(self.copilotUser)
                     - message: location may only be set for key, secretRef, or passthrough
                         auth
                       rule: 'has(self.location) ? has(self.key) || has(self.secretRef)
                         || has(self.passthrough) : true'
+                    - message: copilotUser may not be combined with credentials
+                      rule: '!has(self.copilotUser) || !has(self.credentials)'
                     - message: at most one of the fields in [key secretRef passthrough
-                        aws azure gcp oauthTokenExchange] may be set
-                      rule: (has(self.key)?1:0)+(has(self.secretRef)?1:0)+(has(self.passthrough)?1:0)+(has(self.aws)?1:0)+(has(self.azure)?1:0)+(has(self.gcp)?1:0)+(has(self.oauthTokenExchange)?1:0)
+                        aws azure gcp oauthTokenExchange copilotUser] may be set
+                      rule: (has(self.key)?1:0)+(has(self.secretRef)?1:0)+(has(self.passthrough)?1:0)+(has(self.aws)?1:0)+(has(self.azure)?1:0)+(has(self.gcp)?1:0)+(has(self.oauthTokenExchange)?1:0)+(has(self.copilotUser)?1:0)
                         <= 1
                   authorization:
                     description: Authorization rules that clients must satisfy to
@@ -5165,6 +5170,7 @@ spec:
                 - Bedrock
                 - Cerebras
                 - Cohere
+                - Copilot
                 - Custom
                 - Deepinfra
                 - Deepseek
@@ -5393,6 +5399,10 @@ spec:
               rule: has(self.bedrock) == (has(self.provider) && self.provider == 'Bedrock')
             - message: custom must be set if and only if provider is Custom
               rule: has(self.custom) == (has(self.provider) && self.provider == 'Custom')
+            - message: copilotUser requires the Copilot provider without endpoint
+                overrides
+              rule: '!has(self.policies) || !has(self.policies.auth) || !has(self.policies.auth.copilotUser)
+                || (has(self.provider) && self.provider == ''Copilot'' && !has(self.baseURL))'
             - message: exactly one of the fields in [provider virtualModel] must be
                 set
               rule: (has(self.provider)?1:0)+(has(self.virtualModel)?1:0) == 1

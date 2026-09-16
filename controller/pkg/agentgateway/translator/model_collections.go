@@ -655,7 +655,7 @@ func translateModelLLMProvider(ctx RouteContext, namespace string, model *agentg
 		if preset, ok := modelProviderPreset(*model.Provider); ok {
 			provider.ModelOverride = selectedModel
 			provider.Provider = &api.AIBackend_Provider_ProviderPreset{ProviderPreset: preset}
-			return provider, nil
+			return provider, plugins.ValidateCopilotUserProvider(provider, nil)
 		}
 	}
 
@@ -680,6 +680,8 @@ func translateModelLLMProvider(ctx RouteContext, namespace string, model *agentg
 	}
 
 	switch {
+	case llm.Copilot != nil:
+		provider.Provider = &api.AIBackend_Provider_Copilot{Copilot: &api.AIBackend_Copilot{Model: providerModel(selectedModel, llm.Copilot.Model)}}
 	case llm.OpenAI != nil:
 		provider.Provider = &api.AIBackend_Provider_Openai{Openai: &api.AIBackend_OpenAI{Model: providerModel(selectedModel, llm.OpenAI.Model)}}
 	case llm.Azure != nil:
@@ -736,7 +738,7 @@ func translateModelLLMProvider(ctx RouteContext, namespace string, model *agentg
 	default:
 		return nil, fmt.Errorf("no supported LLM provider configured")
 	}
-	return provider, nil
+	return provider, plugins.ValidateCopilotUserProvider(provider, nil)
 }
 
 func translateModelPolicies(ctx RouteContext, namespace string, model *agentgateway.AgentgatewayModelSpec) ([]*api.BackendPolicySpec, error) {
@@ -805,6 +807,8 @@ func modelLLMProvider(model *agentgateway.AgentgatewayModelSpec) (*agentgateway.
 	}
 	provider := &agentgateway.LLMProvider{}
 	switch *model.Provider {
+	case agentgateway.ModelProviderCopilot:
+		provider.Copilot = &agentgateway.CopilotConfig{}
 	case agentgateway.ModelProviderOpenAI:
 		provider.OpenAI = &agentgateway.OpenAIConfig{}
 	case agentgateway.ModelProviderAzure:

@@ -1488,3 +1488,51 @@ spec:
           jwks:
             inline: '{"keys":[]}'
           validation: {requiredClaims: [exp, nbf, aud, sub]}
+
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: copilot-users
+  namespace: copilot-proof
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: copilot
+  traffic:
+    copilot:
+      clientId: Ov23liBhXifrbEyuGaF1
+      audience: https://copilot.local.test
+      allowedUserIds: [25870869]
+      disableExpiry: true
+      encryptionKeyRef:
+        name: copilot-encryption
+        key: key
+  backend:
+    auth:
+      copilotUser: {}
+
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: copilot-users-ttl
+  namespace: copilot-proof
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: copilot
+  traffic:
+    copilot:
+      clientId: Ov23liBhXifrbEyuGaF1
+      audience: https://copilot.local.test
+      allowedUserIds: [25870869]
+      credentialTTL: 1h
+      encryptionKeyRef:
+        name: copilot-encryption
+        key: key
+  backend:
+    auth:
+      copilotUser: {}

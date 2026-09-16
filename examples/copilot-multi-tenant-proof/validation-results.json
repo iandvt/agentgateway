@@ -1,0 +1,133 @@
+{
+  "mock": {
+    "mode": "mock",
+    "passed": true,
+    "cases": [
+      {
+        "case": "missing",
+        "status": 401,
+        "upstream_requests": 0,
+        "passed": true
+      },
+      {
+        "case": "plaintext",
+        "status": 401,
+        "upstream_requests": 0,
+        "passed": true
+      },
+      {
+        "case": "corrupt",
+        "status": 401,
+        "upstream_requests": 0,
+        "passed": true
+      },
+      {
+        "case": "wrongkey",
+        "status": 401,
+        "upstream_requests": 0,
+        "passed": true
+      },
+      {
+        "case": "wrongpurpose",
+        "status": 401,
+        "upstream_requests": 0,
+        "passed": true
+      },
+      {
+        "case": "wrongaud",
+        "status": 401,
+        "upstream_requests": 0,
+        "passed": true
+      },
+      {
+        "case": "expired",
+        "status": 401,
+        "upstream_requests": 0,
+        "passed": true
+      },
+      {
+        "case": "upstream_expired",
+        "status": 401,
+        "upstream_requests": 0,
+        "passed": true
+      },
+      {
+        "case": "future",
+        "status": 401,
+        "upstream_requests": 0,
+        "passed": true
+      },
+      {
+        "case": "noexp",
+        "status": 401,
+        "upstream_requests": 0,
+        "passed": true
+      },
+      {
+        "case": "ttl_excess",
+        "status": 401,
+        "upstream_requests": 0,
+        "passed": true
+      },
+      {
+        "case": "concurrent-isolation",
+        "requests": 12,
+        "users": [
+          "alice",
+          "bob"
+        ],
+        "passed": true
+      },
+      {
+        "case": "finite-ttl-elapsed",
+        "status": 401,
+        "upstream_requests": 0,
+        "passed": true
+      },
+      {
+        "case": "previous-process-key",
+        "status": 401,
+        "upstream_requests": 0,
+        "passed": true
+      },
+      {
+        "case": "explicit-no-expiry",
+        "status": 200,
+        "passed": true
+      },
+      {
+        "case": "no-expiry-upstream-expired",
+        "status": 401,
+        "upstream_requests": 0,
+        "passed": true
+      }
+    ]
+  },
+  "live": {
+    "mode": "live",
+    "passed": true,
+    "api": {
+      "status": 200,
+      "text": "OK.",
+      "finish_reason": "stop",
+      "DONE": true
+    },
+    "cli": {
+      "status": 200,
+      "text": "OK",
+      "finish_reason": "stop",
+      "DONE": true
+    },
+    "github_expires_in": 28800,
+    "refresh_token_received": true,
+    "host_credential_environment_removed": [
+      "GH_COPILOT_TOKEN",
+      "COPILOT_GITHUB_TOKEN",
+      "GH_TOKEN",
+      "GITHUB_TOKEN",
+      "SSLKEYLOGFILE"
+    ],
+    "effective_expires_at": 1789536384,
+    "gateway_ttl": "none"
+  }
+}

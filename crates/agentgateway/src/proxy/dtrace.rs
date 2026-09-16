@@ -577,6 +577,11 @@ fn remove_pending_watcher(id: u64) {
 }
 
 fn take_sender(req: &Request) -> Option<(Sender<Message>, u64)> {
+	// Debug tracing evaluates raw headers and bodies. Exclude login transactions
+	// and encrypted Copilot credentials before selecting a watcher.
+	if crate::http::copilot::is_sensitive_request(req) {
+		return None;
+	}
 	if !HAS_WATCHERS.load(Ordering::Acquire) {
 		return None;
 	}
@@ -838,6 +843,30 @@ mod tests {
 	use super::*;
 	use crate::cel::{Executor, Expression};
 	use crate::http::Body;
+
+	#[tokio::test]
+	async fn copilot_credentials_are_excluded_from_debug_tracing() {
+		let path = "/copilot-trace-probe";
+		let mut receiver = track_expression(Some(
+			Expression::new_strict(format!("request.path == '{path}'")).unwrap(),
+		));
+		let req = http::Request::builder()
+			.uri(format!("https://example.com{path}"))
+			.header("authorization", "Bearer agw_cp1.synthetic-secret")
+			.body(Body::empty())
+			.unwrap();
+		DebugTracer::maybe_scope(req, |req| async move {
+			assert!(
+				!is_active(),
+				"Copilot bearers must never enter debug tracing"
+			);
+			trace(|tracer| {
+				tracer.request_snapshot("probe", Executor::new_request(&req).debug_snapshot())
+			});
+		})
+		.await;
+		assert!(receiver.receiver.try_recv().is_err());
+	}
 
 	#[tokio::test]
 	async fn scope_future_isolates_concurrent_captured_scopes() {

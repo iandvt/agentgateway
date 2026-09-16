@@ -1227,6 +1227,11 @@ fn backend_auth_kind_from_proto(
 	use proto::agent::azure_managed_identity_credential::user_assigned_identity;
 	use proto::agent::{azure_explicit_config, gcp};
 	Ok(Some(match s.kind {
+		Some(proto::agent::backend_auth_policy::Kind::CopilotUser(config)) => {
+			BackendAuthKind::CopilotUser {
+				invalid: config.translation_error.is_some() || !s.credentials.is_empty(),
+			}
+		},
 		Some(proto::agent::backend_auth_policy::Kind::Passthrough(p)) => BackendAuthKind::Passthrough {
 			location: optional_authorization_location(p.authorization_location.as_ref())?,
 		},
@@ -1893,6 +1898,11 @@ pub(crate) fn backend_with_policies_from_proto(
 						.collect::<Result<Vec<_>, _>>()?;
 					let mut preset = None;
 					let mut provider = match &provider_config.provider {
+						Some(provider::Provider::Copilot(copilot)) => {
+							AIProvider::Copilot(llm::copilot::Provider {
+								model: copilot.model.as_deref().map(strng::new),
+							})
+						},
 						Some(provider::Provider::Openai(openai)) => {
 							let moderation = openai
 								.moderation
@@ -2493,9 +2503,14 @@ fn phased_traffic_policy_from_proto(
 ) -> Result<PhasedTrafficPolicy, ProtoError> {
 	let tp = traffic_policy_from_proto(spec, diagnostics)?;
 	Ok(PhasedTrafficPolicy {
-		phase: match proto::agent::traffic_policy_spec::PolicyPhase::try_from(spec.phase)? {
-			proto::agent::traffic_policy_spec::PolicyPhase::Route => PolicyPhase::Route,
-			proto::agent::traffic_policy_spec::PolicyPhase::Gateway => PolicyPhase::Gateway,
+		phase: if matches!(tp, TrafficPolicy::Copilot(_)) {
+			// An invalid pre-routing Copilot policy must remain attached as a denying route policy.
+			PolicyPhase::Route
+		} else {
+			match proto::agent::traffic_policy_spec::PolicyPhase::try_from(spec.phase)? {
+				proto::agent::traffic_policy_spec::PolicyPhase::Route => PolicyPhase::Route,
+				proto::agent::traffic_policy_spec::PolicyPhase::Gateway => PolicyPhase::Gateway,
+			}
 		},
 		policy: tp,
 	})
@@ -2507,6 +2522,37 @@ fn traffic_policy_from_proto(
 ) -> Result<TrafficPolicy, ProtoError> {
 	use crate::types::proto::agent::traffic_policy_spec as tps;
 	Ok(match &spec.kind {
+		Some(tps::Kind::Copilot(config)) => {
+			let build = || -> anyhow::Result<http::copilot::CopilotPolicy> {
+				anyhow::ensure!(
+					spec.phase == tps::PolicyPhase::Route as i32 && config.translation_error.is_none(),
+					"invalid Copilot policy"
+				);
+				let (credential_ttl, disable_expiry) = match &config.lifetime {
+					Some(proto::agent::copilot_authentication::Lifetime::CredentialTtl(ttl)) => {
+						(Some((*ttl).try_into()?), None)
+					},
+					Some(proto::agent::copilot_authentication::Lifetime::DisableExpiry(disabled)) => {
+						(None, Some(*disabled))
+					},
+					None => anyhow::bail!("Copilot lifetime required"),
+				};
+				http::copilot::CopilotPolicy::from_config(
+					http::copilot::CopilotConfig {
+						client_id: config.client_id.clone(),
+						audience: config.audience.clone(),
+						allowed_user_ids: config.allowed_user_ids.clone(),
+						credential_ttl,
+						disable_expiry,
+						policy_id: config.policy_id.clone(),
+					},
+					&config.encryption_key,
+				)
+			};
+			TrafficPolicy::Copilot(RequestPolicy::single(build().unwrap_or_else(|_| {
+				http::copilot::CopilotPolicy::invalid("invalid Copilot configuration".into())
+			})))
+		},
 		Some(tps::Kind::Timeout(t)) => TrafficPolicy::Timeout(http::timeout::Policy {
 			request_timeout: t.request.as_ref().map(|d| (*d).try_into()).transpose()?,
 			backend_request_timeout: t
@@ -3897,6 +3943,7 @@ fn conditional_traffic_policy_to_policy(
 		TrafficPolicy::RemoteRateLimit(_) => build!(RemoteRateLimit),
 		TrafficPolicy::JwtAuth(_) => build!(JwtAuth),
 		TrafficPolicy::Oidc(_) => build!(Oidc),
+		TrafficPolicy::Copilot(_) => build!(Copilot),
 		TrafficPolicy::BasicAuth(_) => build!(BasicAuth),
 		TrafficPolicy::APIKey(_) => build!(APIKey),
 		TrafficPolicy::Transformation(_) => build!(Transformation),
@@ -3930,6 +3977,7 @@ fn traffic_policy_kind_name(policy: &TrafficPolicy) -> &'static str {
 		TrafficPolicy::ExtProc(_) => "extProc",
 		TrafficPolicy::JwtAuth(_) => "jwt",
 		TrafficPolicy::Oidc(_) => "oidc",
+		TrafficPolicy::Copilot(_) => "copilot",
 		TrafficPolicy::BasicAuth(_) => "basicAuth",
 		TrafficPolicy::APIKey(_) => "apiKey",
 		TrafficPolicy::Budget(_) => "budget",
@@ -4235,6 +4283,283 @@ mod tests {
 	use super::*;
 	use crate::store::RequestPolicyTrait;
 	use crate::types::proto::agent::backend_policy_spec::Ai;
+
+	fn copilot_wire_config() -> proto::agent::CopilotAuthentication {
+		proto::agent::CopilotAuthentication {
+			client_id: "synthetic-client".into(),
+			audience: "https://gateway.test".into(),
+			allowed_user_ids: vec![1, 2],
+			encryption_key: vec![7; 32],
+			policy_id: "namespace/copilot-policy".into(),
+			translation_error: None,
+			lifetime: Some(proto::agent::copilot_authentication::Lifetime::DisableExpiry(true)),
+		}
+	}
+
+	fn copilot_wire_spec(
+		config: proto::agent::CopilotAuthentication,
+	) -> proto::agent::TrafficPolicySpec {
+		proto::agent::TrafficPolicySpec {
+			phase: proto::agent::traffic_policy_spec::PolicyPhase::Route as i32,
+			kind: Some(proto::agent::traffic_policy_spec::Kind::Copilot(config)),
+			..Default::default()
+		}
+	}
+
+	fn copilot_request(credential: Option<&str>) -> crate::http::Request {
+		let mut req = ::http::Request::builder()
+			.uri("/v1/chat/completions")
+			.body(crate::http::Body::empty())
+			.unwrap();
+		req
+			.extensions_mut()
+			.insert(crate::transport::stream::TLSConnectionInfo::default());
+		if let Some(credential) = credential {
+			req.headers_mut().insert(
+				"authorization",
+				format!("Bearer {credential}").parse().unwrap(),
+			);
+		}
+		req
+	}
+
+	#[test]
+	fn copilot_provider_from_xds_preserves_models_and_override() {
+		for (model, model_override, expected) in [
+			(None, None, None),
+			(Some("gpt-4o-mini"), None, Some("gpt-4o-mini")),
+			(Some("gpt-4o-mini"), Some("gpt-4.1"), Some("gpt-4.1")),
+		] {
+			let backend = proto::agent::Backend {
+				key: "namespace/copilot-backend".into(),
+				name: Some(proto::agent::ResourceName {
+					name: "copilot-backend".into(),
+					namespace: "namespace".into(),
+				}),
+				kind: Some(proto::agent::backend::Kind::Ai(proto::agent::AiBackend {
+					provider_groups: vec![proto::agent::ai_backend::ProviderGroup {
+						providers: vec![proto::agent::ai_backend::Provider {
+							name: "copilot".into(),
+							model_override: model_override.map(str::to_owned),
+							provider: Some(proto::agent::ai_backend::provider::Provider::Copilot(
+								proto::agent::ai_backend::Copilot {
+									model: model.map(str::to_owned),
+								},
+							)),
+							..Default::default()
+						}],
+					}],
+				})),
+				..Default::default()
+			};
+			let decoded =
+				backend_with_policies_from_proto(&backend, &mut Diagnostics::default()).unwrap();
+			let Backend::AI(_, ai) = decoded.backend else {
+				panic!("expected AI backend")
+			};
+			let providers = ai.providers.iter();
+			let (provider, _) = providers.iter().next().unwrap();
+			let AIProvider::Copilot(copilot) = &provider.provider else {
+				panic!("expected Copilot provider")
+			};
+			assert_eq!(copilot.model.as_deref(), expected);
+		}
+	}
+
+	#[tokio::test]
+	async fn copilot_xds_policy_authenticates_and_honors_lifetime_mode() {
+		use proto::agent::copilot_authentication::Lifetime;
+		for lifetime in [
+			Lifetime::DisableExpiry(true),
+			Lifetime::CredentialTtl(prost_types::Duration {
+				seconds: 30,
+				nanos: 0,
+			}),
+		] {
+			let mut config = copilot_wire_config();
+			config.lifetime = Some(lifetime);
+			let spec = copilot_wire_spec(config);
+			let decoded = phased_traffic_policy_from_proto(&spec, &mut Diagnostics::default()).unwrap();
+			assert_eq!(decoded.phase, PolicyPhase::Route);
+			let TrafficPolicy::Copilot(policy) = decoded.policy else {
+				panic!("Copilot policy must remain attached")
+			};
+			let policy = &policy.iter().next().unwrap().pol;
+			let credential = policy
+				.test_credential(
+					1,
+					"synthetic-copilot-token",
+					std::time::SystemTime::now(),
+					None,
+				)
+				.unwrap();
+			let mut req = copilot_request(Some(&credential));
+			assert!(
+				policy
+					.authenticate(&mut req)
+					.await
+					.direct_response
+					.is_none()
+			);
+			assert_eq!(
+				crate::http::copilot::request_token(&req).unwrap(),
+				"synthetic-copilot-token"
+			);
+			assert!(!req.headers().contains_key("authorization"));
+			let mut req = copilot_request(None);
+			assert_eq!(
+				policy
+					.authenticate(&mut req)
+					.await
+					.direct_response
+					.unwrap()
+					.status(),
+				401
+			);
+			let serialized = serde_json::to_string(policy).unwrap();
+			assert!(!serialized.contains("encryptionKey"));
+			assert!(!serialized.contains("synthetic-copilot-token"));
+			assert!(serialized.contains("namespace/copilot-policy"));
+		}
+	}
+
+	#[tokio::test]
+	async fn copilot_invalid_xds_policy_remains_attached_and_denies() {
+		use proto::agent::copilot_authentication::Lifetime;
+		for case in [
+			"key31",
+			"key33",
+			"translation",
+			"gateway-phase",
+			"unknown-phase",
+			"missing-lifetime",
+			"false-expiry",
+			"zero-ttl",
+			"negative-ttl",
+			"empty-users",
+			"zero-user",
+			"empty-policy",
+			"empty-audience",
+		] {
+			let mut config = copilot_wire_config();
+			match case {
+				"key31" => config.encryption_key = vec![7; 31],
+				"key33" => config.encryption_key = vec![7; 33],
+				"translation" => config.translation_error = Some("synthetic-resolver-secret".into()),
+				"missing-lifetime" => config.lifetime = None,
+				"false-expiry" => config.lifetime = Some(Lifetime::DisableExpiry(false)),
+				"zero-ttl" => {
+					config.lifetime = Some(Lifetime::CredentialTtl(prost_types::Duration {
+						seconds: 0,
+						nanos: 0,
+					}))
+				},
+				"negative-ttl" => {
+					config.lifetime = Some(Lifetime::CredentialTtl(prost_types::Duration {
+						seconds: -1,
+						nanos: 0,
+					}))
+				},
+				"empty-users" => config.allowed_user_ids.clear(),
+				"zero-user" => config.allowed_user_ids = vec![0],
+				"empty-policy" => config.policy_id.clear(),
+				"empty-audience" => config.audience.clear(),
+				_ => {},
+			}
+			let mut spec = copilot_wire_spec(config);
+			if case == "gateway-phase" {
+				spec.phase = proto::agent::traffic_policy_spec::PolicyPhase::Gateway as i32;
+			}
+			if case == "unknown-phase" {
+				spec.phase = 999;
+			}
+			let mut diagnostics = Diagnostics::default();
+			let decoded = phased_traffic_policy_from_proto(&spec, &mut diagnostics).unwrap();
+			assert_eq!(decoded.phase, PolicyPhase::Route, "{case}");
+			let TrafficPolicy::Copilot(policy) = decoded.policy else {
+				panic!("invalid Copilot policy was dropped: {case}")
+			};
+			let policy = &policy.iter().next().unwrap().pol;
+			let mut req = copilot_request(Some("synthetic-client-secret"));
+			assert_eq!(
+				policy
+					.authenticate(&mut req)
+					.await
+					.direct_response
+					.unwrap()
+					.status(),
+				500,
+				"{case}"
+			);
+			assert!(!crate::http::copilot::has_verified(&req));
+			assert!(!req.headers().contains_key("authorization"));
+			let serialized = serde_json::to_string(policy).unwrap();
+			assert!(serialized.contains("translationError"));
+			for output in [
+				serialized,
+				format!("{policy:?}"),
+				format!("{:?}", diagnostics.into_warnings()),
+			] {
+				assert!(!output.contains("synthetic-resolver-secret"));
+				assert!(!output.contains("synthetic-client-secret"));
+			}
+		}
+	}
+
+	#[tokio::test]
+	async fn copilot_user_xds_rejects_invalid_auth_without_host_fallback() {
+		let test = crate::test_helpers::proxymock::setup_proxy_test("{}").unwrap();
+		let info = auth::BackendInfo {
+			call_target: Target::Hostname("api.githubcopilot.com".into(), 443),
+			target: BackendTarget::Backend {
+				name: Default::default(),
+				namespace: Default::default(),
+				section: None,
+			},
+			inputs: test.inputs(),
+		};
+		for case in ["unverified", "translation", "additional-credential"] {
+			let mut config = proto::agent::BackendAuthPolicy {
+				kind: Some(proto::agent::backend_auth_policy::Kind::CopilotUser(
+					proto::agent::CopilotUserAuth {
+						translation_error: (case == "translation").then(|| "synthetic-resolver-secret".into()),
+					},
+				)),
+				credentials: vec![],
+			};
+			if case == "additional-credential" {
+				config
+					.credentials
+					.push(proto::agent::BackendAuthCredential {
+						value: "synthetic-additional-secret".into(),
+						location: None,
+					});
+			}
+			let kind = backend_auth_kind_from_proto(config, &mut Diagnostics::default())
+				.unwrap()
+				.unwrap();
+			assert!(
+				matches!(kind, BackendAuthKind::CopilotUser { invalid } if invalid == (case != "unverified"))
+			);
+			let serialized = serde_json::to_string(&kind).unwrap();
+			assert!(!serialized.contains("synthetic-resolver-secret"));
+			assert!(!serialized.contains("synthetic-additional-secret"));
+			let mut req = copilot_request(None);
+			assert!(
+				auth::apply_backend_auth(&info, &auth::BackendAuth::new(kind), &mut req)
+					.await
+					.is_err()
+			);
+			assert!(!req.headers().contains_key("authorization"));
+		}
+		let missing = proto::agent::BackendPolicySpec {
+			kind: Some(proto::agent::backend_policy_spec::Kind::Auth(
+				proto::agent::BackendAuthPolicy::default(),
+			)),
+			..Default::default()
+		};
+		assert!(backend_policy_from_proto(&missing, &mut Diagnostics::default()).is_err());
+	}
 
 	#[test]
 	fn prompt_guard_scope_from_proto() {

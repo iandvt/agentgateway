@@ -3776,6 +3776,9 @@ spec:
                             workloadIdentity] may be set
                           rule: (has(self.secretRef)?1:0)+(has(self.managedIdentity)?1:0)+(has(self.workloadIdentity)?1:0)
                             <= 1
+                      copilotUser:
+                        description: Uses only the verified credential from traffic.copilot.
+                        type: object
                       credentials:
                         description: |-
                           Credentials is a list of additional credentials to inject on the
@@ -5300,20 +5303,22 @@ spec:
                             (has(self.kind) && size(self.kind) > 0)'
                     type: object
                     x-kubernetes-validations:
-                    - message: must specify credentials, or at most one of key/secretRef/passthrough/aws/azure/gcp/oauthTokenExchange/crossAppAccess/jwtSign
+                    - message: must specify credentials, or at most one of key/secretRef/passthrough/aws/azure/gcp/oauthTokenExchange/crossAppAccess/jwtSign/copilotUser
                         (credentials may be combined with a primary auth kind)
                       rule: has(self.credentials) || has(self.key) || has(self.secretRef)
                         || has(self.passthrough) || has(self.aws) || has(self.azure)
                         || has(self.gcp) || has(self.oauthTokenExchange) || has(self.crossAppAccess)
-                        || has(self.jwtSign)
+                        || has(self.jwtSign) || has(self.copilotUser)
                     - message: location may only be set for key, secretRef, or passthrough
                         auth
                       rule: 'has(self.location) ? has(self.key) || has(self.secretRef)
                         || has(self.passthrough) : true'
+                    - message: copilotUser may not be combined with credentials
+                      rule: '!has(self.copilotUser) || !has(self.credentials)'
                     - message: at most one of the fields in [key secretRef passthrough
-                        aws azure gcp oauthTokenExchange crossAppAccess jwtSign] may
-                        be set
-                      rule: (has(self.key)?1:0)+(has(self.secretRef)?1:0)+(has(self.passthrough)?1:0)+(has(self.aws)?1:0)+(has(self.azure)?1:0)+(has(self.gcp)?1:0)+(has(self.oauthTokenExchange)?1:0)+(has(self.crossAppAccess)?1:0)+(has(self.jwtSign)?1:0)
+                        aws azure gcp oauthTokenExchange crossAppAccess jwtSign copilotUser]
+                        may be set
+                      rule: (has(self.key)?1:0)+(has(self.secretRef)?1:0)+(has(self.passthrough)?1:0)+(has(self.aws)?1:0)+(has(self.azure)?1:0)+(has(self.gcp)?1:0)+(has(self.oauthTokenExchange)?1:0)+(has(self.crossAppAccess)?1:0)+(has(self.jwtSign)?1:0)+(has(self.copilotUser)?1:0)
                         <= 1
                   extAuth:
                     description: |-
@@ -8147,6 +8152,95 @@ spec:
                         be set
                       rule: '[has(self.request),has(self.response)].filter(x,x==true).size()
                         >= 1'
+                  copilot:
+                    description: Authenticates GitHub users and handles Copilot device
+                      login after routing.
+                    properties:
+                      allowedUserIds:
+                        description: Verified GitHub user IDs admitted by this policy.
+                        items:
+                          format: int64
+                          type: integer
+                        maxItems: 1024
+                        minItems: 1
+                        type: array
+                        x-kubernetes-list-type: set
+                        x-kubernetes-validations:
+                        - message: allowedUserIds must be positive
+                          rule: self.all(id, id > 0)
+                      audience:
+                        description: Deployment identity authenticated in every credential.
+                        maxLength: 1024
+                        minLength: 1
+                        type: string
+                      clientId:
+                        description: GitHub app client ID used for device authorization.
+                        maxLength: 256
+                        minLength: 1
+                        type: string
+                      credentialTTL:
+                        description: Maximum gateway credential lifetime. GitHub expiration
+                          still applies.
+                        maxLength: 32
+                        pattern: ^([0-9]{1,5}(h|m|s|ms)){1,4}$
+                        type: string
+                      disableExpiry:
+                        description: Explicitly disables gateway expiration. GitHub
+                          expiration still applies.
+                        type: boolean
+                      encryptionKeyRef:
+                        description: |-
+                          Same-namespace Secret key containing exactly 32 raw encryption bytes.
+                          Defaults to the data key "key".
+                        properties:
+                          group:
+                            description: API group of the referenced credential; empty
+                              selects the core API group
+                            type: string
+                          key:
+                            description: Key in the referenced Secret. If omitted,
+                              a location-specific default is used
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                          kind:
+                            description: Kind of the referenced credential; empty
+                              defaults to `Secret`
+                            type: string
+                          name:
+                            description: Name of the referenced credential
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                        required:
+                        - name
+                        type: object
+                        x-kubernetes-map-type: atomic
+                        x-kubernetes-validations:
+                        - message: encryptionKeyRef must reference a Secret
+                          rule: (!has(self.group) || self.group == '') && (!has(self.kind)
+                            || self.kind == '' || self.kind == 'Secret')
+                        - message: custom credential refs must set both group and
+                            kind
+                          rule: '(!has(self.group) || size(self.group) == 0) ? (!has(self.kind)
+                            || size(self.kind) == 0 || self.kind == ''Secret'') :
+                            (has(self.kind) && size(self.kind) > 0)'
+                    required:
+                    - allowedUserIds
+                    - audience
+                    - clientId
+                    - encryptionKeyRef
+                    type: object
+                    x-kubernetes-validations:
+                    - message: disableExpiry must be true
+                      rule: '!has(self.disableExpiry) || self.disableExpiry'
+                    - message: credentialTTL must be positive
+                      rule: '!has(self.credentialTTL) || duration(self.credentialTTL)
+                        > duration(''0s'')'
+                    - message: exactly one of the fields in [credentialTTL disableExpiry]
+                        must be set
+                      rule: (has(self.credentialTTL)?1:0)+(has(self.disableExpiry)?1:0)
+                        == 1
                   cors:
                     description: CORS configuration for the policy.
                     properties:
@@ -11140,7 +11234,7 @@ spec:
                 - message: phase PreRouting only supports extAuth, authorization,
                     transformation, extProc, jwtAuthentication, basicAuthentication,
                     apiKeyAuthentication and cors
-                  rule: 'has(self.phase) && self.phase == ''PreRouting'' ? [has(self.buffer),has(self.csrf),has(self.delay),has(self.directResponse),has(self.headerModifiers),has(self.hostRewrite),has(self.rateLimit),has(self.retry),has(self.timeouts)].filter(x,x==true).size()
+                  rule: 'has(self.phase) && self.phase == ''PreRouting'' ? [has(self.buffer),has(self.copilot),has(self.csrf),has(self.delay),has(self.directResponse),has(self.headerModifiers),has(self.hostRewrite),has(self.rateLimit),has(self.retry),has(self.timeouts)].filter(x,x==true).size()
                     == 0 : true'
             type: object
             x-kubernetes-validations:

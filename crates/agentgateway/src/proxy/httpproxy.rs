@@ -223,6 +223,11 @@ async fn apply_request_policies(
 		.await?;
 
 	pol
+		.copilot
+		.apply_without_response("copilot", c, l, req, rp.headers())
+		.await?;
+
+	pol
 		.oidc
 		.apply_without_response("oidc", c, l, req, rp.headers())
 		.await?;
@@ -703,6 +708,7 @@ where
 impl HTTPProxy {
 	pub async fn proxy(&self, connection: Arc<Extension>, mut req: Request) -> Response {
 		let start = agent_core::Timestamp::now();
+		crate::http::copilot::protect_ingress_credential(&mut req);
 
 		dtrace::trace(|f| f.request_started());
 		// Copy connection level attributes into request level attributes
@@ -770,6 +776,18 @@ impl HTTPProxy {
 					..Default::default()
 				});
 			}
+		}
+		if resp
+			.extensions()
+			.get::<http::copilot::SensitiveResponse>()
+			.is_some()
+		{
+			// Login JSON contains bearer credentials. Keep its body out of response
+			// transformations, external processing, debug traces, and CEL snapshots.
+			let body = std::mem::replace(resp.body_mut(), http::Body::empty());
+			log.with(|l| set_final_response_fields(l, &reason, &mut resp));
+			*resp.body_mut() = body;
+			return resp.map(move |body| body.with_observer(log));
 		}
 		if let Some(l) = log.as_mut() {
 			l.cel.ctx().maybe_buffer_response_body(&mut resp).await;
@@ -2368,6 +2386,252 @@ async fn build_simple_backend_call(
 	Ok((backend_call, maybe_inference))
 }
 
+fn validate_copilot_destination(req: &Request, call: &BackendCall) -> Result<(), ProxyError> {
+	let safe = || -> Option<()> {
+		let auth = call.backend_policies.backend_auth.as_ref()?;
+		if !matches!(
+			auth.kind,
+			Some(auth::BackendAuthKind::CopilotUser { invalid: false })
+		) || !auth.credentials.is_empty()
+			|| req.headers().contains_key(http::header::AUTHORIZATION)
+		{
+			return None;
+		}
+		if !matches!(&call.target, Target::Hostname(host, 443) if host.as_str() == "api.githubcopilot.com")
+			|| req.uri().scheme_str() != Some("https")
+			|| req.uri().host() != Some("api.githubcopilot.com")
+			|| req.uri().port_u16().unwrap_or(443) != 443
+			|| req.uri().authority()?.as_str().contains('@')
+		{
+			return None;
+		}
+		if let Some(host) = req.headers().get(http::header::HOST) {
+			if host != "api.githubcopilot.com" && host != "api.githubcopilot.com:443" {
+				return None;
+			}
+		}
+		let provider = call.backend_policies.llm_provider.as_ref()?;
+		if !matches!(provider.provider, llm::AIProvider::Copilot(_))
+			|| provider.provider_backend.is_some()
+			|| provider.host_override.is_some()
+			|| provider.path_override.is_some()
+			|| provider.path_prefix.is_some()
+			|| call.transport_override.is_some()
+			|| call.tunnel_proxy.is_some()
+			|| call.advanced_routing.is_some()
+			|| call.backend_policies.tunnel.is_some()
+			|| !call.connect_headers.is_empty()
+		{
+			return None;
+		}
+		let tls = call.backend_policies.backend_tls.as_ref()?;
+		if tls.is_spiffe()
+			|| tls.hostname_override.is_some()
+			|| tls.metadata.insecure
+			|| tls.metadata.insecure_host
+			|| tls.metadata.hostname.is_some()
+			|| tls.metadata.spiffe
+			|| !tls.metadata.system_roots
+			|| tls.metadata.root.is_some()
+			|| tls.metadata.cert.is_some()
+			|| tls.metadata.subject_alt_names.is_some()
+		{
+			return None;
+		}
+		Some(())
+	};
+	safe().ok_or_else(|| {
+		auth::BackendAuthError::Local(anyhow::anyhow!(
+			"copilotUser requires an unmodified Copilot backend with verified HTTPS"
+		))
+		.into()
+	})
+}
+
+fn apply_copilot_user_auth(req: &mut Request, call: &BackendCall) -> Result<(), ProxyError> {
+	let user_mode = call
+		.backend_policies
+		.backend_auth
+		.as_ref()
+		.is_some_and(|auth| matches!(auth.kind, Some(auth::BackendAuthKind::CopilotUser { .. })));
+	if !user_mode && !http::copilot::has_verified(req) {
+		return Ok(());
+	}
+	if !user_mode {
+		return Err(ProxyError::BackendAuthenticationFailed(
+			crate::http::auth::BackendAuthError::Local(anyhow::anyhow!(
+				"Copilot user requests require copilotUser backend authentication"
+			)),
+		));
+	}
+	validate_copilot_destination(req, call)?;
+	auth::insert_copilot_user_headers(req)
+}
+
+#[cfg(test)]
+mod copilot_destination_tests {
+	use super::*;
+
+	fn target_call() -> (Request, BackendCall) {
+		let provider = llm::AIProvider::Copilot(llm::copilot::Provider { model: None });
+		let policies = BackendPolicies {
+			llm_provider: Some(Arc::new(llm::NamedAIProvider {
+				name: "copilot".into(),
+				provider: provider.clone(),
+				provider_backend: None,
+				host_override: None,
+				path_override: None,
+				path_prefix: None,
+				tokenize: false,
+				inline_policies: Vec::new(),
+			})),
+			backend_auth: Some(auth::BackendAuth::new(auth::BackendAuthKind::CopilotUser {
+				invalid: false,
+			})),
+			..provider.default_connector_policies().unwrap()
+		};
+		let request = ::http::Request::builder()
+			.uri("https://api.githubcopilot.com/chat/completions")
+			.body(http::Body::empty())
+			.unwrap();
+		(
+			request,
+			BackendCall::new(
+				Target::Hostname("api.githubcopilot.com".into(), 443),
+				policies,
+			),
+		)
+	}
+
+	#[tokio::test]
+	async fn copilot_dispatch_uses_only_verified_user_credentials() {
+		let policy = http::copilot::CopilotPolicy::from_config(
+			http::copilot::CopilotConfig {
+				client_id: "synthetic-client".into(),
+				audience: "https://copilot.test".into(),
+				allowed_user_ids: vec![1, 2],
+				credential_ttl: None,
+				disable_expiry: Some(true),
+				policy_id: "test-policy".into(),
+			},
+			&[7; 32],
+		)
+		.unwrap();
+		for (id, token) in [(1, "synthetic-alice"), (2, "synthetic-bob")] {
+			let (mut req, call) = target_call();
+			req.extensions_mut().insert(TLSConnectionInfo::default());
+			let envelope = policy
+				.test_credential(id, token, std::time::SystemTime::now(), None)
+				.unwrap();
+			req.headers_mut().insert(
+				http::header::AUTHORIZATION,
+				HeaderValue::from_str(&format!("Bearer {envelope}")).unwrap(),
+			);
+			assert!(
+				policy
+					.authenticate(&mut req)
+					.await
+					.direct_response
+					.is_none()
+			);
+			assert!(!req.headers().contains_key(http::header::AUTHORIZATION));
+			apply_copilot_user_auth(&mut req, &call).unwrap();
+			let value = req.headers().get(http::header::AUTHORIZATION).unwrap();
+			assert_eq!(value.to_str().unwrap(), format!("Bearer {token}"));
+			assert!(value.is_sensitive());
+			req.headers_mut().remove(http::header::AUTHORIZATION);
+			let mut wrong = call;
+			Arc::make_mut(&mut wrong.backend_policies).backend_auth =
+				Some(auth::BackendAuth::new(auth::BackendAuthKind::Copilot));
+			assert!(apply_copilot_user_auth(&mut req, &wrong).is_err());
+			assert!(!req.headers().contains_key(http::header::AUTHORIZATION));
+		}
+		let (mut req, call) = target_call();
+		assert!(apply_copilot_user_auth(&mut req, &call).is_err());
+		assert!(!req.headers().contains_key(http::header::AUTHORIZATION));
+	}
+
+	#[test]
+	fn copilot_dispatch_rejects_provider_overrides() {
+		for field in [
+			"host",
+			"path",
+			"prefix",
+			"tls-host",
+			"missing-tls",
+			"invalid-auth",
+			"host-header",
+		] {
+			let (mut req, mut call) = target_call();
+			let policies = Arc::make_mut(&mut call.backend_policies);
+			match field {
+				"host" => {
+					Arc::make_mut(policies.llm_provider.as_mut().unwrap()).host_override =
+						Some(Target::Hostname("other.example".into(), 443))
+				},
+				"path" => {
+					Arc::make_mut(policies.llm_provider.as_mut().unwrap()).path_override =
+						Some("/other".into())
+				},
+				"prefix" => {
+					Arc::make_mut(policies.llm_provider.as_mut().unwrap()).path_prefix = Some("/other".into())
+				},
+				"tls-host" => {
+					policies.backend_tls.as_mut().unwrap().metadata.hostname = Some("other.example".into())
+				},
+				"missing-tls" => policies.backend_tls = None,
+				"invalid-auth" => {
+					policies.backend_auth = Some(auth::BackendAuth::new(auth::BackendAuthKind::CopilotUser {
+						invalid: true,
+					}))
+				},
+				"host-header" => {
+					req.headers_mut().insert(
+						http::header::HOST,
+						HeaderValue::from_static("other.example"),
+					);
+				},
+				_ => unreachable!(),
+			}
+			assert!(
+				validate_copilot_destination(&req, &call).is_err(),
+				"{field}"
+			);
+		}
+	}
+
+	#[test]
+	fn copilot_rejects_changed_destination_and_cleartext() {
+		let (mut req, mut call) = target_call();
+		assert!(validate_copilot_destination(&req, &call).is_ok());
+		call.target = Target::Hostname("other.example".into(), 443);
+		assert!(validate_copilot_destination(&req, &call).is_err());
+		call.target = Target::Hostname("api.githubcopilot.com".into(), 443);
+		*req.uri_mut() = "http://api.githubcopilot.com/chat/completions"
+			.parse()
+			.unwrap();
+		assert!(validate_copilot_destination(&req, &call).is_err());
+	}
+
+	#[test]
+	fn copilot_rejects_tls_bypass_and_header_replacement() {
+		let (mut req, mut call) = target_call();
+		req.headers_mut().insert(
+			http::header::AUTHORIZATION,
+			HeaderValue::from_static("Bearer replacement"),
+		);
+		assert!(validate_copilot_destination(&req, &call).is_err());
+		req.headers_mut().remove(http::header::AUTHORIZATION);
+		Arc::make_mut(&mut call.backend_policies)
+			.backend_tls
+			.as_mut()
+			.unwrap()
+			.metadata
+			.insecure = true;
+		assert!(validate_copilot_destination(&req, &call).is_err());
+	}
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn make_backend_call(
 	inputs: Arc<ProxyInputs>,
@@ -2406,6 +2670,14 @@ async fn make_backend_call(
 	};
 
 	let policy_client = PolicyClient::new(inputs.clone()).with_parent(&req);
+	if http::copilot::has_verified(&req) && !matches!(backend, Backend::AI(_, _)) {
+		return Err(
+			ProxyError::BackendAuthenticationFailed(crate::http::auth::BackendAuthError::Local(
+				anyhow::anyhow!("Copilot user credentials require a Copilot AI backend"),
+			))
+			.into(),
+		);
+	}
 	let hbone_source = req
 		.extensions()
 		.get::<WaypointService>()
@@ -3015,9 +3287,21 @@ async fn make_backend_call(
 		return Ok(resp);
 	}
 	let transport = build_backend_transport(&inputs, &backend_call, hbone_source).await?;
+	if http::copilot::has_verified(&req) {
+		// The client normally sets the scheme from the transport after this point.
+		// Validate the effective upstream URI, including for loopback HTTP clients.
+		http::modify_req_uri(&mut req, |uri| {
+			uri.scheme = Some(transport.scheme());
+			Ok(())
+		})
+		.map_err(ProxyError::Processing)?;
+	}
 	dtrace::snapshot!(Request, "final request", &req);
 	let request_body_limit = crate::http::buffer_limit(&req);
-	let req = req.map(|b| dtrace::TracingBody::maybe_wrap("final request", b, request_body_limit));
+	let mut req =
+		req.map(|b| dtrace::TracingBody::maybe_wrap("final request", b, request_body_limit));
+	// No awaited processing or request snapshot may observe the recovered user token.
+	apply_copilot_user_auth(&mut req, &backend_call)?;
 	let mut call = client::Call {
 		req,
 		target: backend_call.target,

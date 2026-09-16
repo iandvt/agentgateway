@@ -364,10 +364,28 @@ message BackendAuthPolicy {
     OAuthTokenExchange oauth_token_exchange = 6;
     CrossAppAccessAuth cross_app_access = 7;
     JwtSign jwt_sign = 9;
+    CopilotUserAuth copilot_user = 10;
   }
 
   // Additional credentials to inject on the backend request, independent of `kind`.
   repeated BackendAuthCredential credentials = 8;
+}
+
+message CopilotUserAuth {
+  optional string translation_error = 1;
+}
+
+message CopilotAuthentication {
+  string client_id = 1;
+  string audience = 2;
+  repeated uint64 allowed_user_ids = 3;
+  oneof lifetime {
+    google.protobuf.Duration credential_ttl = 4;
+    bool disable_expiry = 5;
+  }
+  bytes encryption_key = 6;
+  optional string translation_error = 7;
+  string policy_id = 8;
 }
 
 message BackendAuthCredential {
@@ -1284,6 +1302,7 @@ message TrafficPolicySpec {
     HostRewrite host_rewrite = 21;
     Buffer buffer = 22;
     Delay delay = 23;
+    CopilotAuthentication copilot = 24;
   }
 }
 
@@ -1833,6 +1852,9 @@ message AwsAgentCoreBackend {
 }
 
 message AIBackend {
+  message Copilot {
+    optional string model = 1;
+  }
   message HostOverride {
     string host = 1;
     int32 port = 2;
@@ -1967,6 +1989,7 @@ message AIBackend {
       Azure azure = 13;
       Custom custom = 15;
       ProviderPreset provider_preset = 16;
+      Copilot copilot = 19;
     }
     repeated BackendPolicySpec inline_policies = 10;
   }

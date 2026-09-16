@@ -197,6 +197,27 @@ func TestGetAgentgatewayModelStatus(t *testing.T) {
 	}
 }
 
+func TestModelLLMProviderCopilot(t *testing.T) {
+	kind := agentgateway.ModelProvider("Copilot")
+	provider, err := modelLLMProvider(&agentgateway.AgentgatewayModelSpec{Provider: &kind})
+	if err != nil {
+		t.Fatalf("Copilot provider must be supported: %v", err)
+	}
+	if provider.Copilot == nil {
+		t.Fatal("expected Copilot provider")
+	}
+	for _, selected := range []*string{nil, new("gpt-4o-mini")} {
+		translated, err := translateModelLLMProvider(RouteContext{}, "default", &agentgateway.AgentgatewayModelSpec{Provider: &kind}, "copilot", selected)
+		if err != nil {
+			t.Fatal(err)
+		}
+		copilot := translated.GetCopilot()
+		if copilot == nil || (copilot.Model == nil) != (selected == nil) || (selected != nil && copilot.GetModel() != *selected) {
+			t.Fatalf("unexpected Copilot model: %v", copilot)
+		}
+	}
+}
+
 func TestModelLLMProvider(t *testing.T) {
 	t.Run("default provider", func(t *testing.T) {
 		providerType := agentgateway.ModelProviderOpenAI
@@ -369,5 +390,18 @@ func TestTranslatePresetProviderBaseURL(t *testing.T) {
 	}
 	if provider.GetBaseUrl() != baseURL {
 		t.Errorf("base URL = %q, want %q", provider.GetBaseUrl(), baseURL)
+	}
+}
+
+func TestModelCopilotUserRejectsEndpointOverrides(t *testing.T) {
+	for _, provider := range []agentgateway.ModelProvider{agentgateway.ModelProviderCopilot, agentgateway.ModelProviderOpenAI} {
+		model := &agentgateway.AgentgatewayModelSpec{Provider: &provider, Policies: &agentgateway.ModelPolicies{Auth: &agentgateway.ModelBackendAuth{CopilotUser: &agentgateway.CopilotUserAuth{}}}}
+		if provider == agentgateway.ModelProviderCopilot {
+			model.BaseURL = new("https://custom.example")
+		}
+		_, err := translateModelLLMProvider(RouteContext{}, "default", model, "copilot", nil)
+		if err == nil || !strings.Contains(err.Error(), "copilotUser requires the Copilot provider without endpoint overrides") {
+			t.Fatalf("expected prohibited target error: %v", err)
+		}
 	}
 }

@@ -377,6 +377,7 @@ impl BackendPolicies {
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoutePolicies {
+	pub copilot: RequestPolicy<http::copilot::CopilotPolicy>,
 	pub local_rate_limit: RequestPolicy<Vec<http::localratelimit::RateLimit>>,
 	pub remote_rate_limit: RequestPolicy<remoteratelimit::RemoteRateLimit>,
 	pub authorization: RequestPolicy<HTTPAuthorizationSet>,
@@ -451,6 +452,7 @@ impl GatewayPolicies {
 impl RoutePolicies {
 	pub fn iter(&self) -> impl Iterator<Item = &dyn PolicyExpressions> {
 		[
+			&self.copilot as &dyn PolicyExpressions,
 			&self.local_rate_limit as &dyn PolicyExpressions,
 			&self.remote_rate_limit as &dyn PolicyExpressions,
 			&self.authorization as &dyn PolicyExpressions,
@@ -1102,6 +1104,9 @@ impl Store {
 				},
 				TrafficPolicy::JwtAuth(p) => {
 					pol.jwt.merge_with_inheritance(p, lock_inheritance);
+				},
+				TrafficPolicy::Copilot(p) => {
+					pol.copilot.merge_with_inheritance(p, lock_inheritance);
 				},
 				TrafficPolicy::Oidc(p) => {
 					pol.oidc.merge_with_inheritance(p, lock_inheritance);
@@ -1965,7 +1970,7 @@ impl Store {
 		res: ADPResource,
 		diagnostics: &mut Diagnostics,
 	) -> anyhow::Result<()> {
-		trace!(%name, "insert resource {res:?}");
+		trace!(%name, "insert resource");
 		match res.kind {
 			Some(XdsKind::Bind(w)) => {
 				self
@@ -2451,6 +2456,89 @@ mod tests {
 		ResourceName, Target, TunnelProtocol,
 	};
 	use crate::types::frontend::LoggingPolicy;
+
+	#[test]
+	fn xds_insert_trace_omits_copilot_encryption_key() {
+		use crate::types::proto::agent as proto;
+
+		#[derive(Clone)]
+		struct LogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+		impl std::io::Write for LogWriter {
+			fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+				self.0.lock().unwrap().extend_from_slice(buf);
+				Ok(buf.len())
+			}
+
+			fn flush(&mut self) -> std::io::Result<()> {
+				Ok(())
+			}
+		}
+
+		let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
+		let writer = LogWriter(logs.clone());
+		let subscriber = tracing_subscriber::fmt()
+			.with_max_level(Level::TRACE)
+			.with_ansi(false)
+			.without_time()
+			.with_writer(move || writer.clone())
+			.finish();
+		let encryption_key = vec![117; 32];
+		let key_debug = format!("{encryption_key:?}");
+		let resource = ADPResource {
+			kind: Some(XdsKind::Policy(XdsPolicy {
+				key: "synthetic-copilot-policy".into(),
+				target: Some(proto::PolicyTarget {
+					kind: Some(proto::policy_target::Kind::Route(
+						proto::policy_target::RouteTarget {
+							name: "route".into(),
+							namespace: "default".into(),
+							kind: "HTTPRoute".into(),
+							..Default::default()
+						},
+					)),
+				}),
+				kind: Some(proto::policy::Kind::Traffic(proto::TrafficPolicySpec {
+					phase: proto::traffic_policy_spec::PolicyPhase::Route as i32,
+					kind: Some(proto::traffic_policy_spec::Kind::Copilot(
+						proto::CopilotAuthentication {
+							client_id: "synthetic-client".into(),
+							audience: "https://gateway.test".into(),
+							allowed_user_ids: vec![1],
+							encryption_key,
+							policy_id: "default/synthetic-copilot-policy".into(),
+							lifetime: Some(proto::copilot_authentication::Lifetime::DisableExpiry(true)),
+							..Default::default()
+						},
+					)),
+					..Default::default()
+				})),
+				..Default::default()
+			})),
+		};
+
+		tracing::subscriber::with_default(subscriber, || {
+			Store::with_ipv6_enabled(true)
+				.insert_xds(
+					strng::literal!("synthetic-copilot-policy"),
+					resource,
+					&mut Diagnostics::default(),
+				)
+				.expect("Copilot policy should be inserted");
+		});
+
+		let logs = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+		assert!(logs.contains("insert resource"), "{logs}");
+		assert!(logs.contains("name=synthetic-copilot-policy"), "{logs}");
+		assert!(
+			!logs.contains(&key_debug),
+			"xDS trace exposed encryption key bytes"
+		);
+		assert!(
+			!logs.contains("encryption_key"),
+			"xDS trace exposed the raw policy"
+		);
+	}
 
 	fn listener() -> ListenerName {
 		ListenerName {

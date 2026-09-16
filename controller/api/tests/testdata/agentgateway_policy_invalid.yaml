@@ -1810,3 +1810,315 @@ spec:
           jwks:
             inline: '{"keys":[]}'
           validation: {requiredClaims: [iss]}
+
+---
+_err: exactly one
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: copilot-both
+  namespace: copilot-proof
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: copilot
+  traffic:
+    copilot:
+      clientId: Ov23liBhXifrbEyuGaF1
+      audience: https://copilot.local.test
+      allowedUserIds: [25870869]
+      disableExpiry: true
+      credentialTTL: 1h
+      encryptionKeyRef:
+        name: copilot-encryption
+        key: key
+  backend:
+    auth:
+      copilotUser: {}
+
+---
+_err: exactly one
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: copilot-neither
+  namespace: copilot-proof
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: copilot
+  traffic:
+    copilot:
+      clientId: Ov23liBhXifrbEyuGaF1
+      audience: https://copilot.local.test
+      allowedUserIds: [25870869]
+
+      encryptionKeyRef:
+        name: copilot-encryption
+        key: key
+  backend:
+    auth:
+      copilotUser: {}
+
+---
+_err: disableExpiry must be true
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: copilot-false
+  namespace: copilot-proof
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: copilot
+  traffic:
+    copilot:
+      clientId: Ov23liBhXifrbEyuGaF1
+      audience: https://copilot.local.test
+      allowedUserIds: [25870869]
+      disableExpiry: false
+      encryptionKeyRef:
+        name: copilot-encryption
+        key: key
+  backend:
+    auth:
+      copilotUser: {}
+
+---
+_err: credentialTTL must be positive
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: copilot-zero
+  namespace: copilot-proof
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: copilot
+  traffic:
+    copilot:
+      clientId: Ov23liBhXifrbEyuGaF1
+      audience: https://copilot.local.test
+      allowedUserIds: [25870869]
+      credentialTTL: 0s
+      encryptionKeyRef:
+        name: copilot-encryption
+        key: key
+  backend:
+    auth:
+      copilotUser: {}
+
+---
+_err: at least 1
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: copilot-empty-users
+  namespace: copilot-proof
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: copilot
+  traffic:
+    copilot:
+      clientId: Ov23liBhXifrbEyuGaF1
+      audience: https://copilot.local.test
+      allowedUserIds: []
+      disableExpiry: true
+      encryptionKeyRef:
+        name: copilot-encryption
+        key: key
+  backend:
+    auth:
+      copilotUser: {}
+
+---
+_err: positive
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: copilot-nonpositive-user
+  namespace: copilot-proof
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: copilot
+  traffic:
+    copilot:
+      clientId: Ov23liBhXifrbEyuGaF1
+      audience: https://copilot.local.test
+      allowedUserIds: [0]
+      disableExpiry: true
+      encryptionKeyRef:
+        name: copilot-encryption
+        key: key
+  backend:
+    auth:
+      copilotUser: {}
+
+---
+_err: at least 1
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: copilot-empty-client
+  namespace: copilot-proof
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: copilot
+  traffic:
+    copilot:
+      clientId: ""
+      audience: https://copilot.local.test
+      allowedUserIds: [25870869]
+      disableExpiry: true
+      encryptionKeyRef:
+        name: copilot-encryption
+        key: key
+  backend:
+    auth:
+      copilotUser: {}
+
+---
+_err: at least 1
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: copilot-empty-audience
+  namespace: copilot-proof
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: copilot
+  traffic:
+    copilot:
+      clientId: Ov23liBhXifrbEyuGaF1
+      audience: ""
+      allowedUserIds: [25870869]
+      disableExpiry: true
+      encryptionKeyRef:
+        name: copilot-encryption
+        key: key
+  backend:
+    auth:
+      copilotUser: {}
+
+---
+_err: PreRouting only supports
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: copilot-prerouting
+  namespace: copilot-proof
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: copilot
+  traffic:
+    phase: PreRouting
+    copilot:
+      clientId: Ov23liBhXifrbEyuGaF1
+      audience: https://copilot.local.test
+      allowedUserIds: [25870869]
+      disableExpiry: true
+      encryptionKeyRef:
+        name: copilot-encryption
+        key: key
+  backend:
+    auth:
+      copilotUser: {}
+
+---
+_err: copilotUser may not be combined with credentials
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: copilot-credentials
+  namespace: copilot-proof
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: copilot
+  traffic:
+    copilot:
+      clientId: Ov23liBhXifrbEyuGaF1
+      audience: https://copilot.local.test
+      allowedUserIds: [25870869]
+      disableExpiry: true
+      encryptionKeyRef:
+        name: copilot-encryption
+        key: key
+  backend:
+    auth:
+      copilotUser: {}
+      credentials:
+      - secretRef:
+          name: another-secret
+        location:
+          header:
+            name: x-api-key
+
+---
+_err: location may only be set
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: copilot-location
+  namespace: copilot-proof
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: copilot
+  traffic:
+    copilot:
+      clientId: Ov23liBhXifrbEyuGaF1
+      audience: https://copilot.local.test
+      allowedUserIds: [25870869]
+      disableExpiry: true
+      encryptionKeyRef:
+        name: copilot-encryption
+        key: key
+  backend:
+    auth:
+      copilotUser: {}
+      location:
+        header:
+          name: Authorization
+
+---
+_err: at most one
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: copilot-conflicting-auth
+  namespace: copilot-proof
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: copilot
+  traffic:
+    copilot:
+      clientId: Ov23liBhXifrbEyuGaF1
+      audience: https://copilot.local.test
+      allowedUserIds: [25870869]
+      disableExpiry: true
+      encryptionKeyRef:
+        name: copilot-encryption
+        key: key
+  backend:
+    auth:
+      copilotUser: {}
+      key: fake-key
