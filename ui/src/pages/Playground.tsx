@@ -14,6 +14,7 @@ import {
 	User
 } from 'lucide-react';
 import { type ReactNode, useEffect, useMemo, useState } from 'react';
+import { useFieldArray, useForm } from 'react-hook-form';
 
 import { sendChatCompletion, sendMcpJsonRpc } from '@/api/playgroundApi';
 import { claudeSubscriptionWarning } from '@/claudeSubscription';
@@ -161,7 +162,10 @@ export function PlaygroundPage() {
 	const [system, setSystem] = useState('You are a concise assistant.');
 	const [systemOpen, setSystemOpen] = useState(false);
 	const [prompt, setPrompt] = useState('');
-	const [messages, setMessages] = useState<ChatMessage[]>([]);
+	const { control, getValues } = useForm<{ messages: ChatMessage[] }>({
+		defaultValues: { messages: [] }
+	});
+	const { append, fields, remove } = useFieldArray({ control, name: 'messages' });
 	const [error, setError] = useState<string | null>(null);
 	const [loading, setLoading] = useState(false);
 	const [runSteps, setRunSteps] = useState<RunStep[]>([]);
@@ -317,7 +321,7 @@ export function PlaygroundPage() {
 		const userChatMessage: ChatMessage = { role: 'user', content: userMessage };
 		const outboundMessages: ChatMessage[] = [
 			...(system.trim() ? [{ role: 'system' as const, content: system.trim() }] : []),
-			...messages,
+			...getValues('messages'),
 			userChatMessage
 		];
 		setLoading(true);
@@ -390,7 +394,7 @@ export function PlaygroundPage() {
 					),
 					raw: response
 				};
-				setMessages(current => [...current, userChatMessage, assistantMessage]);
+				append([userChatMessage, assistantMessage]);
 				setPrompt('');
 				setRunSteps([
 					{ label: 'Preparing request', state: 'done' },
@@ -419,7 +423,7 @@ export function PlaygroundPage() {
 					arguments: execution.arguments,
 					raw: execution.result
 				}));
-				setMessages(current => [...current, ...toolMessages]);
+				append(toolMessages);
 				const followUpMessages = [...outboundMessages, assistantMessage, ...toolMessages];
 				setRunSteps([
 					{ label: 'Preparing request', state: 'done' },
@@ -453,23 +457,19 @@ export function PlaygroundPage() {
 					{ label: 'Sending tool results', state: 'done' },
 					{ label: 'Waiting for final response', state: 'done' }
 				]);
-				setMessages(current => [
-					...current,
-					{
-						role: 'assistant',
-						content: assistantText(finalResponse),
-						meta: responseMeta(
-							finalResponse,
-							requestModel,
-							selectedCatalogProvider ?? undefined,
-							finalLatencyMs
-						),
-						raw: finalResponse
-					}
-				]);
+				append({
+					role: 'assistant',
+					content: assistantText(finalResponse),
+					meta: responseMeta(
+						finalResponse,
+						requestModel,
+						selectedCatalogProvider ?? undefined,
+						finalLatencyMs
+					),
+					raw: finalResponse
+				});
 			} else {
-				setMessages(current => [
-					...current,
+				append([
 					userChatMessage,
 					{
 						role: 'assistant',
@@ -702,18 +702,10 @@ export function PlaygroundPage() {
 				<Panel className="playground-chat-panel">
 					{runSteps.length ? <RunTimeline steps={runSteps} /> : null}
 					<div className="mini-chat">
-						{messages.length === 0 && !loading ? (
+						{fields.length === 0 && !loading ? (
 							<div className="chat-empty">No messages yet.</div>
 						) : (
-							messages.map((message, index) => (
-								<ChatMessageView
-									message={message}
-									key={`${message.role}-${
-										// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-										index
-									}`}
-								/>
-							))
+							fields.map(field => <ChatMessageView message={field} key={field.id} />)
 						)}
 						{loading ? (
 							<div className="chat-message user pending">
@@ -754,9 +746,9 @@ export function PlaygroundPage() {
 						<button
 							className="button"
 							type="button"
-							disabled={loading || messages.length === 0}
+							disabled={loading || fields.length === 0}
 							onClick={() => {
-								setMessages([]);
+								remove();
 								setRunSteps([]);
 								setPrompt('');
 							}}
@@ -899,14 +891,8 @@ function MessageMetaChips(props: { meta: MessageMeta }) {
 function RunTimeline(props: { steps: RunStep[] }) {
 	return (
 		<div className="playground-run-timeline">
-			{props.steps.map((step, index) => (
-				<div
-					className={`run-step ${step.state}`}
-					key={`${
-						// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-						index
-					}-${step.label}`}
-				>
+			{props.steps.map(step => (
+				<div className={`run-step ${step.state}`} key={step.label}>
 					<span className="run-step-dot">
 						{step.state === 'active' ? <Loader2 className="spin" size={12} /> : null}
 					</span>

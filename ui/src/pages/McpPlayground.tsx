@@ -1,7 +1,8 @@
 import { Link } from '@tanstack/react-router';
 import { Braces, Cable, Play, RotateCcw } from 'lucide-react';
 import type { KeyboardEvent } from 'react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useState } from 'react';
+import { type Control, useController, useFieldArray, useForm } from 'react-hook-form';
 
 import { sendMcpJsonRpc } from '@/api/playgroundApi';
 import { EnumSelector } from '@/components/EnumSelector';
@@ -19,6 +20,10 @@ import { corsNeedsUpdate, currentOrigin, playgroundCorsPolicy } from '@/cors';
 import { mcpPlaygroundEndpoint } from '@/gatewayUrls';
 import { useMcpConfigData, useStoredStringState, useUpsertPolicyResource } from '@/hooks';
 import { extractMcpTools, type McpTool, nextRpcId, sendInitializedNotification } from '@/mcp';
+
+type McpBlockDraft = {
+	blocks: { block: unknown }[];
+};
 
 type JsonSchema = {
 	type?: string | string[];
@@ -586,10 +591,7 @@ function McpResultView(props: { response: McpResponse }) {
 			) : content.length > 0 || structuredContent !== undefined ? (
 				<div className="mcp-result-card">
 					<strong>{toolError ? 'Tool error' : 'Tool output'}</strong>
-					{content.map((item, index) => (
-						// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-						<ContentBlock block={item} key={index} />
-					))}
+					<McpContentBlocks content={content} />
 					{structuredContent !== undefined ? (
 						<details className="schema-details" open>
 							<summary>Structured content</summary>
@@ -610,6 +612,44 @@ function McpResultView(props: { response: McpResponse }) {
 			</details>
 		</div>
 	);
+}
+
+function McpContentBlocks(props: { content: unknown[] }) {
+	// One list for the whole result lifetime. Position i keeps its RHF id while the result changes,
+	// so the ContentBlock at position i keeps its DOM node and <details> state, as index keys did.
+	const { control } = useForm({
+		defaultValues: { blocks: props.content.map(block => ({ block })) }
+	});
+	const { append, fields, remove } = useFieldArray({ control, name: 'blocks' });
+	// Layout effect so the row count matches the latest result before paint.
+	useLayoutEffect(() => {
+		if (fields.length < props.content.length) {
+			append(props.content.slice(fields.length).map(block => ({ block })));
+		}
+		if (fields.length > props.content.length) {
+			remove(
+				Array.from(
+					{ length: fields.length - props.content.length },
+					(_, offset) => props.content.length + offset
+				)
+			);
+		}
+	});
+	return fields
+		.slice(0, props.content.length)
+		.map((field, index) => (
+			<ContentRow control={control} index={index} block={props.content[index]} key={field.id} />
+		));
+}
+
+function ContentRow(props: { control: Control<McpBlockDraft>; index: number; block: unknown }) {
+	const { field } = useController({ control: props.control, name: `blocks.${props.index}.block` });
+	// Unconditional write, wrapped as an event target so a block key named target or ref is not
+	// special. setValue would skip writes that deepEqual calls unchanged.
+	useLayoutEffect(() => {
+		field.onChange({ target: { value: props.block } });
+	}, [props.block, field.onChange]);
+	return <ContentBlock block={field.value} />;
 }
 
 function ContentBlock(props: { block: unknown }) {
