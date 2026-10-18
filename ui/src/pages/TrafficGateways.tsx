@@ -1,5 +1,6 @@
 import { GitBranch, Network, Pencil, Plus, Trash2 } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { type ReactNode, useLayoutEffect, useMemo, useState } from 'react';
+import { useFieldArray, useForm } from 'react-hook-form';
 
 import {
 	ConfigDiffDrawer,
@@ -288,72 +289,71 @@ export function TrafficGatewaysPage() {
 												</tr>
 											</thead>
 											<tbody>
-												{gateway.listeners.map((listener, listenerIndex) => (
-													<tr
-														key={`${listener.name}-${
-															// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-															listenerIndex
-														}`}
-													>
-														<td className="strong">
-															{gatewayListenerName(listener, listenerIndex)}
-														</td>
-														<td>{listener.hostname || '*'}</td>
-														<td>{gatewayProtocolLabel(listener)}</td>
-														<td>
-															<span className={listener.tls ? 'badge ok' : 'badge'}>
-																{listener.tls ? 'TLS' : 'Plain'}
-															</span>
-														</td>
-														<td>{gatewayListenerPolicyCount(listener)}</td>
-														<td className="row-actions">
-															<Tooltip
-																content={
-																	traffic.hybrid && !databaseGateway(name)
-																		? 'File-owned listeners must be edited in raw configuration'
-																		: 'Edit listener'
-																}
-															>
-																<button
-																	className="icon-button"
-																	type="button"
-																	aria-label="Edit listener"
-																	disabled={traffic.hybrid && !databaseGateway(name)}
-																	onClick={() =>
-																		setDrawer(`listener:edit:${name}:${listenerIndex}`)
+												<ListenerRows
+													listeners={gateway.listeners}
+													renderRow={(listener, listenerIndex, rowKey) => (
+														<tr key={rowKey}>
+															<td className="strong">
+																{gatewayListenerName(listener, listenerIndex)}
+															</td>
+															<td>{listener.hostname || '*'}</td>
+															<td>{gatewayProtocolLabel(listener)}</td>
+															<td>
+																<span className={listener.tls ? 'badge ok' : 'badge'}>
+																	{listener.tls ? 'TLS' : 'Plain'}
+																</span>
+															</td>
+															<td>{gatewayListenerPolicyCount(listener)}</td>
+															<td className="row-actions">
+																<Tooltip
+																	content={
+																		traffic.hybrid && !databaseGateway(name)
+																			? 'File-owned listeners must be edited in raw configuration'
+																			: 'Edit listener'
 																	}
 																>
-																	<Pencil size={16} />
-																</button>
-															</Tooltip>
-															<Tooltip
-																content={
-																	traffic.hybrid && !databaseGateway(name)
-																		? 'File-owned listeners cannot be deleted here'
-																		: 'Delete listener'
-																}
-															>
-																<button
-																	className="icon-button danger"
-																	type="button"
-																	aria-label="Delete listener"
-																	disabled={traffic.hybrid && !databaseGateway(name)}
-																	onClick={() =>
-																		saveGatewayListeners(name, gateway => {
-																			if (!gateway.listeners) return;
-																			gateway.listeners = gateway.listeners.filter(
-																				(_, index) => index !== listenerIndex
-																			);
-																			if (gateway.listeners.length === 0) delete gateway.listeners;
-																		})
+																	<button
+																		className="icon-button"
+																		type="button"
+																		aria-label="Edit listener"
+																		disabled={traffic.hybrid && !databaseGateway(name)}
+																		onClick={() =>
+																			setDrawer(`listener:edit:${name}:${listenerIndex}`)
+																		}
+																	>
+																		<Pencil size={16} />
+																	</button>
+																</Tooltip>
+																<Tooltip
+																	content={
+																		traffic.hybrid && !databaseGateway(name)
+																			? 'File-owned listeners cannot be deleted here'
+																			: 'Delete listener'
 																	}
 																>
-																	<Trash2 size={16} />
-																</button>
-															</Tooltip>
-														</td>
-													</tr>
-												))}
+																	<button
+																		className="icon-button danger"
+																		type="button"
+																		aria-label="Delete listener"
+																		disabled={traffic.hybrid && !databaseGateway(name)}
+																		onClick={() =>
+																			saveGatewayListeners(name, gateway => {
+																				if (!gateway.listeners) return;
+																				gateway.listeners = gateway.listeners.filter(
+																					(_, index) => index !== listenerIndex
+																				);
+																				if (gateway.listeners.length === 0)
+																					delete gateway.listeners;
+																			})
+																		}
+																	>
+																		<Trash2 size={16} />
+																	</button>
+																</Tooltip>
+															</td>
+														</tr>
+													)}
+												/>
 											</tbody>
 										</table>
 									</div>
@@ -433,6 +433,66 @@ export function TrafficGatewaysPage() {
 				/>
 			) : null}
 		</div>
+	);
+}
+
+// RHF reads object arguments with a `target` key as DOM events, so object values
+// go through `field.onChange({ target: { value } })`.
+function listenerRowIdentities(listeners: Array<{ name?: string | null }>) {
+	const occurrences = new Map<string, number>();
+	return listeners.map(listener => {
+		const name = JSON.stringify(listener.name ?? null);
+		const occurrence = occurrences.get(name) ?? 0;
+		occurrences.set(name, occurrence + 1);
+		return `${name}#${occurrence}`;
+	});
+}
+
+function ListenerRows<T extends { name?: string | null }>(props: {
+	listeners: T[];
+	renderRow: (listener: T, index: number, key: string) => ReactNode;
+}) {
+	const identities = listenerRowIdentities(props.listeners);
+	const identityKey = JSON.stringify(identities);
+	const { control, getValues } = useForm({
+		defaultValues: { rows: identities.map(identity => ({ identity })) }
+	});
+	const { fields, insert, remove } = useFieldArray({ control, name: 'rows' });
+
+	// Runs before paint. Removes rows whose identity is gone, then inserts missing
+	// rows at their position. Rows that stay keep their field ids.
+	useLayoutEffect(() => {
+		const wanted: string[] = JSON.parse(identityKey);
+		const current = getValues('rows').map(row => row.identity);
+		const wantedSet = new Set(wanted);
+		for (let index = current.length - 1; index >= 0; index--) {
+			if (!wantedSet.has(current[index])) {
+				remove(index);
+				current.splice(index, 1);
+			}
+		}
+		wanted.forEach((identity, index) => {
+			if (current[index] === identity) return;
+			const existing = current.indexOf(identity);
+			if (existing >= 0) {
+				remove(existing);
+				current.splice(existing, 1);
+			}
+			insert(index, { identity }, { shouldFocus: false });
+			current.splice(index, 0, identity);
+		});
+	}, [identityKey, getValues, insert, remove]);
+
+	const positions = new Map(identities.map((identity, index) => [identity, index]));
+	return (
+		<>
+			{fields.flatMap(field => {
+				const index = positions.get(field.identity);
+				return index === undefined
+					? []
+					: [props.renderRow(props.listeners[index], index, field.id)];
+			})}
+		</>
 	);
 }
 
