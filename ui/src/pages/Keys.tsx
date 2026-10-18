@@ -15,6 +15,14 @@ import {
 	X
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import {
+	type Control,
+	Controller,
+	type UseFormRegister,
+	useController,
+	useFieldArray,
+	useForm
+} from 'react-hook-form';
 
 import type { BudgetStatus, BudgetStatusResponse } from '@/api/budgetsApi';
 import { ConfigDiffSaveActions } from '@/components/ConfigDiffDrawer';
@@ -608,6 +616,28 @@ function keyFieldsFrom(key: VirtualApiKey) {
 	};
 }
 
+type KeyFormValues = KeyFields & {
+	key: string;
+	keyMode: 'auto' | 'custom';
+	replaceKey: boolean;
+	storeRaw: boolean;
+};
+
+// The drawer is dirty when these fields differ from the values it opened with.
+function keyDraftJson(values: KeyFormValues) {
+	return JSON.stringify({
+		name: values.name,
+		keyMode: values.keyMode,
+		key: values.key,
+		replaceKey: values.replaceKey,
+		storeRaw: values.storeRaw,
+		metadataValues: values.metadataValues,
+		modelAccess: values.modelAccess,
+		allowedModels: values.allowedModels,
+		budgets: values.budgets
+	});
+}
+
 function KeyEditor(props: {
 	initial: VirtualApiKey;
 	config?: GatewayConfig | null;
@@ -622,12 +652,32 @@ function KeyEditor(props: {
 }) {
 	const isNew = !props.previousKey;
 	const initialMetadata = metadataObject(props.initial.metadata);
-	const [fields, setFields] = useState(() => keyFieldsFrom(props.initial));
-	const { name, metadataValues, modelAccess, allowedModels, budgets } = fields;
-	const [keyMode, setKeyMode] = useState<'auto' | 'custom'>(isNew ? 'auto' : 'custom');
-	const [key, setKey] = useState(isNew || !hasKeyValue(props.initial) ? '' : props.initial.key);
-	const [replaceKey, setReplaceKey] = useState(false);
-	const [storeRaw, setStoreRaw] = useState(!keyHashSupported);
+	const defaults: KeyFormValues = {
+		...keyFieldsFrom(props.initial),
+		keyMode: isNew ? 'auto' : 'custom',
+		key: isNew || !hasKeyValue(props.initial) ? '' : props.initial.key,
+		replaceKey: false,
+		storeRaw: !keyHashSupported
+	};
+	const { control, getValues, register, reset, setValue, watch } = useForm<KeyFormValues>({
+		defaultValues: defaults
+	});
+	const { field: keyField } = useController({ control, name: 'key' });
+	// watch() returns RHF's live values, which it mutates in place. The clone keeps the saved key
+	// and the useMergedEdits baseline independent of later edits.
+	const values = structuredClone(watch());
+	const {
+		name,
+		metadataValues,
+		modelAccess,
+		allowedModels,
+		budgets,
+		keyMode,
+		key,
+		replaceKey,
+		storeRaw
+	} = values;
+	const budgetList = useFieldArray({ control, name: 'budgets' });
 	const [generatedKey] = useState(newGeneratedKey);
 	const [hashed, setHashed] = useState<{ key: string; hash: string } | null>(null);
 	const [submitted, setSubmitted] = useState(false);
@@ -645,18 +695,8 @@ function KeyEditor(props: {
 			current = false;
 		};
 	}, [storeRaw, rawKey]);
-	const draft = JSON.stringify({
-		name,
-		keyMode,
-		key,
-		replaceKey,
-		storeRaw,
-		metadataValues,
-		modelAccess,
-		allowedModels,
-		budgets
-	});
-	const [initialDraft] = useState(() => draft);
+	const [initialDraft] = useState(() => keyDraftJson(defaults));
+	const draft = keyDraftJson(values);
 	const nameRequired = (isNew || budgets.length > 0) && !name.trim();
 	const duplicateName = isNew ? duplicateKeyName(name, props.existingKeys) : false;
 	const modelError =
@@ -732,10 +772,6 @@ function KeyEditor(props: {
 		return nameRequired || modelError || invalidBudgets || hashError ? null : merged.value;
 	}
 
-	function update(patch: Partial<KeyFields>) {
-		setFields(current => ({ ...current, ...patch }));
-	}
-
 	function save() {
 		const virtualKey = nextVirtualKey();
 		if (!virtualKey) return;
@@ -750,7 +786,10 @@ function KeyEditor(props: {
 
 	const keyInput = (
 		<input
-			value={key}
+			ref={keyField.ref}
+			value={keyField.value}
+			onBlur={keyField.onBlur}
+			onChange={keyField.onChange}
 			type="text"
 			className="masked-secret-input"
 			autoComplete="off"
@@ -761,7 +800,6 @@ function KeyEditor(props: {
 			data-form-type="other"
 			name="agw-virtual-api-key"
 			spellCheck={false}
-			onChange={event => setKey(event.target.value)}
 			placeholder="agw_sk_..."
 		/>
 	);
@@ -779,8 +817,8 @@ function KeyEditor(props: {
 				// it when asked to.
 				onChange: value => {
 					const next = value as VirtualApiKey;
-					setFields(keyFieldsFrom(next));
-					if (replacing) setStoreRaw(hasKeyValue(next) || !keyHashSupported);
+					const nextStoreRaw = replacing ? hasKeyValue(next) || !keyHashSupported : storeRaw;
+					reset({ ...getValues(), ...keyFieldsFrom(next), storeRaw: nextStoreRaw });
 					merged.reset(value);
 				}
 			}}
@@ -815,11 +853,7 @@ function KeyEditor(props: {
 		>
 			<LostFieldsWarning lost={merged.lost} />
 			<Field label="Name">
-				<input
-					value={name}
-					onChange={event => update({ name: event.target.value })}
-					placeholder="Platform team"
-				/>
+				<input {...register('name')} placeholder="Platform team" />
 			</Field>
 			{submitted && hashError ? (
 				<StatusBanner state="bad" title="Invalid key hash">
@@ -842,14 +876,20 @@ function KeyEditor(props: {
 					label="Key value"
 					tooltip={props.help.field<VirtualApiKey>('LocalAPIKey', 'key')}
 				>
-					<Dropdown
-						ariaLabel="Key value"
-						value={keyMode}
-						options={[
-							{ value: 'auto', label: 'agw_sk_***** (auto generate)' },
-							{ value: 'custom', label: 'Use custom key' }
-						]}
-						onChange={value => setKeyMode(value as 'auto' | 'custom')}
+					<Controller
+						control={control}
+						name="keyMode"
+						render={({ field }) => (
+							<Dropdown
+								ariaLabel="Key value"
+								value={field.value}
+								options={[
+									{ value: 'auto', label: 'agw_sk_***** (auto generate)' },
+									{ value: 'custom', label: 'Use custom key' }
+								]}
+								onChange={value => field.onChange(value as 'auto' | 'custom')}
+							/>
+						)}
 					/>
 				</FieldGroup>
 			) : (
@@ -866,8 +906,8 @@ function KeyEditor(props: {
 									className="table-action"
 									type="button"
 									onClick={() => {
-										setKey(newGeneratedKey());
-										setReplaceKey(true);
+										setValue('key', newGeneratedKey());
+										setValue('replaceKey', true);
 									}}
 								>
 									<RefreshCw size={14} />
@@ -880,7 +920,7 @@ function KeyEditor(props: {
 								<button
 									className="table-action"
 									type="button"
-									onClick={() => setReplaceKey(current => !current)}
+									onClick={() => setValue('replaceKey', !replaceKey)}
 								>
 									{replaceKey ? <X size={14} /> : <Pencil size={14} />}
 									{replaceKey ? 'Keep existing' : 'Edit'}
@@ -901,12 +941,7 @@ function KeyEditor(props: {
 			) : null}
 			{replacing ? (
 				<label className="config-option-row">
-					<input
-						type="checkbox"
-						checked={storeRaw}
-						disabled={!keyHashSupported}
-						onChange={event => setStoreRaw(event.target.checked)}
-					/>
+					<input type="checkbox" {...register('storeRaw')} disabled={!keyHashSupported} />
 					<span>
 						<strong>Store raw key</strong>
 						<small>
@@ -937,9 +972,13 @@ function KeyEditor(props: {
 					</StatusBanner>
 				) : null}
 				<BudgetEditor
+					control={control}
+					register={register}
+					fields={budgetList.fields}
 					budgets={budgets}
 					apiKeyName={keyName(props.initial)}
-					onChange={value => update({ budgets: value })}
+					append={budgetList.append}
+					remove={budgetList.remove}
 				/>
 				{submitted && invalidBudgets ? (
 					<StatusBanner state="bad" title="Invalid budgets">
@@ -974,26 +1013,38 @@ function KeyEditor(props: {
 								: 'This key cannot request any model.'
 					}
 				>
-					<SegmentedControl
-						ariaLabel="Model access"
-						value={modelAccess}
-						options={[
-							{ value: 'unrestricted', label: 'Unrestricted' },
-							{ value: 'restricted', label: 'Selected models' },
-							{ value: 'deny', label: 'Deny all' }
-						]}
-						onChange={value => update({ modelAccess: value })}
+					<Controller
+						control={control}
+						name="modelAccess"
+						render={({ field }) => (
+							<SegmentedControl
+								ariaLabel="Model access"
+								value={field.value}
+								options={[
+									{ value: 'unrestricted', label: 'Unrestricted' },
+									{ value: 'restricted', label: 'Selected models' },
+									{ value: 'deny', label: 'Deny all' }
+								]}
+								onChange={field.onChange}
+							/>
+						)}
 					/>
 				</FieldGroup>
 				{modelAccess === 'restricted' ? (
-					<ListEditor
-						label="Allowed model patterns"
-						tooltip={props.help.field<VirtualApiKey>('LocalAPIKey', 'allowedModels')}
-						values={allowedModels}
-						onChange={value => update({ allowedModels: value })}
-						placeholder="gpt-5.5 or openai/*"
-						emptyText="No model patterns configured."
-						suggestions={modelSuggestions}
+					<Controller
+						control={control}
+						name="allowedModels"
+						render={({ field }) => (
+							<ListEditor
+								label="Allowed model patterns"
+								tooltip={props.help.field<VirtualApiKey>('LocalAPIKey', 'allowedModels')}
+								values={field.value}
+								onChange={field.onChange}
+								placeholder="gpt-5.5 or openai/*"
+								emptyText="No model patterns configured."
+								suggestions={modelSuggestions}
+							/>
+						)}
 					/>
 				) : null}
 				{submitted && modelError ? (
@@ -1014,13 +1065,20 @@ function KeyEditor(props: {
 						: 'None'
 				}
 			>
-				<KeyValueEditor
-					tooltip={props.help.field<VirtualApiKey>('LocalAPIKey', 'metadata')}
-					values={metadataValues}
-					quickKeys={['user', 'group']}
-					keyPlaceholder="owner"
-					valuePlaceholder="platform"
-					onChange={value => update({ metadataValues: value })}
+				<Controller
+					control={control}
+					name="metadataValues"
+					render={({ field }) => (
+						<KeyValueEditor
+							tooltip={props.help.field<VirtualApiKey>('LocalAPIKey', 'metadata')}
+							values={field.value}
+							quickKeys={['user', 'group']}
+							keyPlaceholder="owner"
+							valuePlaceholder="platform"
+							// Object values are wrapped: RHF reads an object with a target key as a DOM event.
+							onChange={next => field.onChange({ target: { value: next } })}
+						/>
+					)}
 				/>
 			</CollapsiblePolicySection>
 			{props.saveError ? (
@@ -1033,34 +1091,29 @@ function KeyEditor(props: {
 }
 
 function BudgetEditor(props: {
+	control: Control<KeyFormValues>;
+	register: UseFormRegister<KeyFormValues>;
+	fields: Array<{ id: string }>;
 	budgets: VirtualApiKeyBudget[];
 	apiKeyName: string;
-	onChange: (budgets: VirtualApiKeyBudget[]) => void;
+	append: (budget: VirtualApiKeyBudget) => void;
+	remove: (index: number) => void;
 }) {
 	const [editingIndex, setEditingIndex] = useState<number | null>(null);
 	const status = useBudgetStatus({ enabled: props.budgets.length > 0 });
 
 	function addBudget() {
-		props.onChange([
-			...props.budgets,
-			{
-				name: '',
-				limit: { unit: 'USD', amount: 0 },
-				window: { rolling: '30d' },
-				onBudgetExceeded: 'Audit'
-			}
-		]);
+		props.append({
+			name: '',
+			limit: { unit: 'USD', amount: 0 },
+			window: { rolling: '30d' },
+			onBudgetExceeded: 'Audit'
+		});
 		setEditingIndex(props.budgets.length);
 	}
 
-	function updateBudget(index: number, value: VirtualApiKeyBudget) {
-		props.onChange(
-			props.budgets.map((budget, budgetIndex) => (budgetIndex === index ? value : budget))
-		);
-	}
-
 	function removeBudget(index: number) {
-		props.onChange(props.budgets.filter((_, budgetIndex) => budgetIndex !== index));
+		props.remove(index);
 		setEditingIndex(current =>
 			current === null || current === index ? null : current > index ? current - 1 : current
 		);
@@ -1068,18 +1121,18 @@ function BudgetEditor(props: {
 
 	return (
 		<div className="api-key-budget-editor">
-			{props.budgets.length === 0 ? (
+			{props.fields.length === 0 ? (
 				<div className="empty-inline">No budgets configured. Usage is unlimited.</div>
 			) : (
 				<div className="api-key-budget-list">
-					{props.budgets.map((budget, index) => {
+					{props.fields.map((field, index) => {
+						const budget = props.budgets[index];
 						const editing = editingIndex === index;
 						const live = status.data?.budgets.find(
 							item => item.apiKeyName === props.apiKeyName && item.name === budget.name.trim()
 						);
 						return (
-							// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-							<article className="api-key-budget-card" key={index}>
+							<article className="api-key-budget-card" key={field.id}>
 								<header className="api-key-budget-card-header">
 									<div className="api-key-budget-card-title">
 										<strong>{budget.name.trim() || 'Untitled budget'}</strong>
@@ -1109,10 +1162,7 @@ function BudgetEditor(props: {
 									<div className="api-key-budget-form">
 										<Field label="Name" hint="Stable identifier used for accounting.">
 											<input
-												value={budget.name}
-												onChange={event =>
-													updateBudget(index, { ...budget, name: event.target.value })
-												}
+												{...props.register(`budgets.${index}.name`)}
 												placeholder="monthly-spend"
 											/>
 										</Field>
@@ -1120,61 +1170,93 @@ function BudgetEditor(props: {
 											label="Rolling window"
 											hint="Examples: 24h, 7d, or 30d. Leave empty for a budget that never resets."
 										>
-											<input
-												value={budget.window?.rolling ?? ''}
-												onChange={event =>
-													updateBudget(index, {
-														...budget,
-														window: event.target.value.trim()
-															? { rolling: event.target.value }
-															: undefined
-													})
-												}
-												placeholder="30d"
-											/>
+											{(id, hintId, invalid) => (
+												<Controller
+													control={props.control}
+													name={`budgets.${index}.window`}
+													render={({ field: windowField }) => (
+														<input
+															id={id}
+															aria-describedby={hintId}
+															aria-invalid={invalid || undefined}
+															value={windowField.value?.rolling ?? ''}
+															onChange={event =>
+																// Object values are wrapped: RHF reads an object with a target key as a DOM event.
+																windowField.onChange({
+																	target: {
+																		value: event.target.value.trim()
+																			? { rolling: event.target.value }
+																			: undefined
+																	}
+																})
+															}
+															placeholder="30d"
+														/>
+													)}
+												/>
+											)}
 										</Field>
 										<Field label="Limit amount">
-											<input
-												type="number"
-												min="0"
-												step={budget.limit.unit === 'USD' ? 'any' : '1'}
-												aria-label={`Budget ${index + 1} amount`}
-												value={Number.isFinite(budget.limit.amount) ? budget.limit.amount : ''}
-												onChange={event =>
-													updateBudget(index, {
-														...budget,
-														limit: { ...budget.limit, amount: event.target.valueAsNumber }
-													})
-												}
-											/>
+											{(id, hintId, invalid) => (
+												<Controller
+													control={props.control}
+													name={`budgets.${index}.limit.amount`}
+													render={({ field: amountField }) => (
+														<input
+															id={id}
+															aria-describedby={hintId}
+															aria-invalid={invalid || undefined}
+															type="number"
+															min="0"
+															step={budget.limit.unit === 'USD' ? 'any' : '1'}
+															aria-label={`Budget ${index + 1} amount`}
+															value={Number.isFinite(amountField.value) ? amountField.value : ''}
+															onChange={event => amountField.onChange(event.target.valueAsNumber)}
+														/>
+													)}
+												/>
+											)}
 										</Field>
 										<FieldGroup label="Limit unit">
-											<SegmentedControl
-												ariaLabel={`Budget ${index + 1} unit`}
-												value={budget.limit.unit}
-												options={[
-													{ value: 'USD', label: 'USD' },
-													{ value: 'Tokens', label: 'Tokens' }
-												]}
-												onChange={unit =>
-													updateBudget(index, {
-														...budget,
-														limit: { ...budget.limit, unit }
-													})
-												}
+											<Controller
+												control={props.control}
+												name={`budgets.${index}.limit.unit`}
+												render={({ field: unitField }) => (
+													<SegmentedControl
+														ariaLabel={`Budget ${index + 1} unit`}
+														value={unitField.value}
+														options={[
+															{ value: 'USD', label: 'USD' },
+															{ value: 'Tokens', label: 'Tokens' }
+														]}
+														onChange={unitField.onChange}
+													/>
+												)}
 											/>
 										</FieldGroup>
 										<FieldGroup label="When limit is reached" className="api-key-budget-form-wide">
-											<SegmentedControl
-												ariaLabel={`Budget ${index + 1} enforcement`}
-												value={budget.onBudgetExceeded}
-												options={[
-													{ value: 'Block', label: 'Block requests', description: 'Return 429' },
-													{ value: 'Audit', label: 'Audit only', description: 'Continue serving' }
-												]}
-												onChange={onBudgetExceeded =>
-													updateBudget(index, { ...budget, onBudgetExceeded })
-												}
+											<Controller
+												control={props.control}
+												name={`budgets.${index}.onBudgetExceeded`}
+												render={({ field: exceededField }) => (
+													<SegmentedControl
+														ariaLabel={`Budget ${index + 1} enforcement`}
+														value={exceededField.value}
+														options={[
+															{
+																value: 'Block',
+																label: 'Block requests',
+																description: 'Return 429'
+															},
+															{
+																value: 'Audit',
+																label: 'Audit only',
+																description: 'Continue serving'
+															}
+														]}
+														onChange={exceededField.onChange}
+													/>
+												)}
 											/>
 										</FieldGroup>
 									</div>
@@ -1441,17 +1523,14 @@ function BudgetSummary(props: {
 	if (!budgets.length) return <span className="muted">—</span>;
 	return (
 		<div className="key-budget-summary">
-			{budgets.map((budget, index) => {
+			{budgets.map(budget => {
 				const live = props.status?.budgets.find(
 					item => item.apiKeyName === props.apiKeyName && item.name === budget.name
 				);
 				const { used, fraction, level } = budgetProgress(budget, live);
 				return (
 					<Tooltip
-						key={`${budget.name}:${
-							// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-							index
-						}`}
+						key={budget.name}
 						content={`${budgetAmountLabel(used, budget.limit.unit)} of ${budgetAmountLabel(
 							budget.limit.amount,
 							budget.limit.unit
