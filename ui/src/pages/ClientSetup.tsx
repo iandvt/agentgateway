@@ -1,6 +1,7 @@
 import { Check, Clipboard, Code2, GitBranch, KeyRound, Terminal } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { useMemo, useState } from 'react';
+import { useFieldArray, useForm } from 'react-hook-form';
 
 import claudeIcon from '@/assets/claude-color.svg';
 import codexIcon from '@/assets/codex-color.svg';
@@ -55,7 +56,7 @@ type ClientRecipe = {
 		| 'pi'
 		| 'windsurf';
 	provider?: ProviderName;
-	steps?: ReactNode[];
+	steps?: ReactNode;
 	language: string;
 	code: string;
 };
@@ -431,14 +432,7 @@ function ClientRecipeCard(props: {
 					<p>{props.recipe.description}</p>
 				</div>
 			</div>
-			{props.recipe.steps?.length ? (
-				<ol className="client-recipe-steps">
-					{props.recipe.steps.map((step, index) => (
-						// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-						<li key={index}>{step}</li>
-					))}
-				</ol>
-			) : null}
+			{props.recipe.steps ? <ol className="client-recipe-steps">{props.recipe.steps}</ol> : null}
 			<HighlightedCode code={props.recipe.code} language={props.recipe.language} />
 		</Panel>
 	);
@@ -527,21 +521,23 @@ claude --model ${JSON.stringify(args.model)}`
 			title: 'Claude Desktop',
 			description: 'Connect Claude Desktop to agentgateway using third-party inference settings.',
 			icon: 'claude',
-			steps: [
+			steps: (
 				<>
-					Open Claude Desktop and enable developer mode: <strong>Help</strong> &gt;{' '}
-					<strong>Troubleshooting</strong> &gt; <strong>Enable Developer Mode</strong>.
-				</>,
-				<>
-					Fully quit and relaunch Claude Desktop. A new <strong>Developer</strong> menu appears in
-					the menu bar.
-				</>,
-				<>
-					Open <strong>Developer</strong> &gt; <strong>Configure Third-Party Inference</strong> &gt;{' '}
-					<strong>Gateway</strong>.
-				</>,
-				<>Enter the gateway URL and virtual API key, save, then restart Claude Desktop.</>
-			],
+					<li>
+						Open Claude Desktop and enable developer mode: <strong>Help</strong> &gt;{' '}
+						<strong>Troubleshooting</strong> &gt; <strong>Enable Developer Mode</strong>.
+					</li>
+					<li>
+						Fully quit and relaunch Claude Desktop. A new <strong>Developer</strong> menu appears in
+						the menu bar.
+					</li>
+					<li>
+						Open <strong>Developer</strong> &gt; <strong>Configure Third-Party Inference</strong>{' '}
+						&gt; <strong>Gateway</strong>.
+					</li>
+					<li>Enter the gateway URL and virtual API key, save, then restart Claude Desktop.</li>
+				</>
+			),
 			language: 'text',
 			code: `Gateway URL: ${base}
 API Key: ${requiredApiKey}`
@@ -568,14 +564,16 @@ codex --model "${args.model}" \\
 			title: 'OpenCode',
 			description: 'Connect OpenCode to agentgateway.',
 			icon: 'opencode',
-			steps: [
+			steps: (
 				<>
-					Create this <code>opencode.json</code> in your project root.
-				</>,
-				<>
-					Run <code>opencode</code> from the same directory.
+					<li>
+						Create this <code>opencode.json</code> in your project root.
+					</li>
+					<li>
+						Run <code>opencode</code> from the same directory.
+					</li>
 				</>
-			],
+			),
 			language: 'bash',
 			code: `
 cat > opencode.json <<'EOF'
@@ -606,16 +604,18 @@ opencode`
 			title: 'Pi',
 			description: 'Connect Pi to agentgateway using the Responses API.',
 			icon: 'pi',
-			steps: [
+			steps: (
 				<>
-					Add this configuration to <code>~/.pi/agent/models.json</code>. If the file exists, merge
-					the <code>agentgateway</code> entry into its <code>providers</code> object.
-				</>,
-				<>
-					Start <code>pi</code>, then use <code>/model</code> to select <code>{args.model}</code>{' '}
-					under <code>agentgateway</code>.
+					<li>
+						Add this configuration to <code>~/.pi/agent/models.json</code>. If the file exists,
+						merge the <code>agentgateway</code> entry into its <code>providers</code> object.
+					</li>
+					<li>
+						Start <code>pi</code>, then use <code>/model</code> to select <code>{args.model}</code>{' '}
+						under <code>agentgateway</code>.
+					</li>
 				</>
-			],
+			),
 			language: 'json',
 			code: JSON.stringify(
 				{
@@ -637,19 +637,22 @@ opencode`
 			title: 'Goose',
 			description: 'Connect Goose to agentgateway using its OpenAI provider.',
 			icon: 'goose',
-			steps: [
+			steps: (
 				<>
-					Run <code>goose configure</code> &gt; <strong>Configure Providers</strong> &gt;{' '}
-					<strong>OpenAI</strong>, or export the variables below before starting a session.
-				</>,
-				<>
-					To persist the settings, add them to <code>~/.config/goose/config.yaml</code>.
-				</>,
-				<>
-					<code>goose configure</code> cannot enter custom model names; set <code>GOOSE_MODEL</code>{' '}
-					in <code>config.yaml</code> for models missing from the provider list.
+					<li>
+						Run <code>goose configure</code> &gt; <strong>Configure Providers</strong> &gt;{' '}
+						<strong>OpenAI</strong>, or export the variables below before starting a session.
+					</li>
+					<li>
+						To persist the settings, add them to <code>~/.config/goose/config.yaml</code>.
+					</li>
+					<li>
+						<code>goose configure</code> cannot enter custom model names; set{' '}
+						<code>GOOSE_MODEL</code> in <code>config.yaml</code> for models missing from the
+						provider list.
+					</li>
 				</>
-			],
+			),
 			language: 'bash',
 			code: `export GOOSE_PROVIDER=openai
 export GOOSE_MODEL=${JSON.stringify(args.model)}
@@ -665,18 +668,20 @@ goose session`
 			title: 'Cursor',
 			description: 'Connect Cursor to agentgateway using the OpenAI base URL override.',
 			icon: 'cursor',
-			steps: [
+			steps: (
 				<>
-					Open <strong>Cursor Settings</strong> &gt; <strong>Models</strong>.
-				</>,
-				<>
-					Enable <strong>Override OpenAI Base URL</strong> and set it to <code>{base}</code>.
-				</>,
-				<>
-					Add <code>{args.model}</code> as a custom model, then test from <strong>Ask</strong> or{' '}
-					<strong>Plan</strong> mode.
+					<li>
+						Open <strong>Cursor Settings</strong> &gt; <strong>Models</strong>.
+					</li>
+					<li>
+						Enable <strong>Override OpenAI Base URL</strong> and set it to <code>{base}</code>.
+					</li>
+					<li>
+						Add <code>{args.model}</code> as a custom model, then test from <strong>Ask</strong> or{' '}
+						<strong>Plan</strong> mode.
+					</li>
 				</>
-			],
+			),
 			language: 'text',
 			code: `Override OpenAI Base URL: ${base}
 OpenAI API Key: ${requiredApiKey}
@@ -687,15 +692,17 @@ Custom model: ${args.model}`
 			title: 'GitHub Copilot',
 			description: 'Connect VS Code Copilot Business or Enterprise to agentgateway.',
 			icon: 'copilot',
-			steps: [
+			steps: (
 				<>
-					Open <strong>VS Code Settings</strong> and search for <code>github.copilot</code>.
-				</>,
-				<>
-					Edit <code>settings.json</code> and set the advanced proxy URL.
-				</>,
-				<>Reload VS Code and test Copilot suggestions or chat.</>
-			],
+					<li>
+						Open <strong>VS Code Settings</strong> and search for <code>github.copilot</code>.
+					</li>
+					<li>
+						Edit <code>settings.json</code> and set the advanced proxy URL.
+					</li>
+					<li>Reload VS Code and test Copilot suggestions or chat.</li>
+				</>
+			),
 			language: 'json',
 			code: `{
   "github.copilot.advanced": {
@@ -732,17 +739,19 @@ models:
 			title: 'Windsurf',
 			description: 'Connect Windsurf to agentgateway using its HTTP proxy setting.',
 			icon: 'windsurf',
-			steps: [
+			steps: (
 				<>
-					Open <strong>Windsurf Settings</strong>.
-				</>,
-				<>
-					Search for <strong>Http: Proxy</strong>.
-				</>,
-				<>
-					Set the proxy URL to <code>{base}</code> and save.
+					<li>
+						Open <strong>Windsurf Settings</strong>.
+					</li>
+					<li>
+						Search for <strong>Http: Proxy</strong>.
+					</li>
+					<li>
+						Set the proxy URL to <code>{base}</code> and save.
+					</li>
 				</>
-			],
+			),
 			language: 'text',
 			code: `Http: Proxy: ${base}`
 		},
@@ -880,23 +889,24 @@ function ClientSetupIcon(props: { recipe: ClientRecipe; compact?: boolean }) {
 function HighlightedCode(props: { code: string; language: string }) {
 	return (
 		<pre className={`client-code-block code-lang-${props.language}`}>
-			<code>{highlightCode(props.code, props.language)}</code>
+			<code>
+				{/* Keyed by the source so rows always mount with the lines they describe. */}
+				<CodeLines key={props.code} code={props.code} language={props.language} />
+			</code>
 		</pre>
 	);
 }
 
-function highlightCode(code: string, language: string) {
-	return code.split('\n').flatMap((line, lineIndex, lines) => [
-		<span
-			className="code-line"
-			key={`line-${
-				// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-				lineIndex
-			}`}
-		>
-			{highlightLine(line, language, lineIndex)}
+function CodeLines(props: { code: string; language: string }) {
+	const { control } = useForm({
+		defaultValues: { lines: props.code.split('\n').map(text => ({ text })) }
+	});
+	const { fields } = useFieldArray({ control, name: 'lines' });
+	return fields.flatMap((field, lineIndex) => [
+		<span className="code-line" key={field.id}>
+			{highlightLine(field.text, props.language, lineIndex)}
 		</span>,
-		lineIndex < lines.length - 1 ? '\n' : null
+		lineIndex < fields.length - 1 ? '\n' : null
 	]);
 }
 

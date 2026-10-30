@@ -29,6 +29,7 @@ import {
 	useRef,
 	useState
 } from 'react';
+import { useFieldArray, useForm } from 'react-hook-form';
 
 import { SchemaHelpPanel } from '@/components/SchemaHelpPanel';
 import { parseSchemaYamlEditorValue, SchemaYamlEditor } from '@/components/SchemaYamlEditor';
@@ -609,23 +610,29 @@ export function Tooltip(props: {
 			</span>
 			{open ? (
 				<span className="tooltip-popover" role="tooltip" id={id} ref={popoverRef} style={style}>
-					{formatTooltipContent(props.content)}
+					{typeof props.content === 'string' ? (
+						<TooltipTextParts key={props.content} text={props.content} />
+					) : (
+						props.content
+					)}
 				</span>
 			) : null}
 		</span>
 	);
 }
 
-function formatTooltipContent(content: ReactNode) {
-	if (typeof content !== 'string') return content;
-	const parts = content.split(/(`[^`]+`)/g);
-	return parts.map((part, index) => {
+// The caller keys this component by its text, so a text change remounts it and the
+// useForm defaults always match the current split. Field ids are only used as keys.
+function TooltipTextParts(props: { text: string }) {
+	const parts = props.text.split(/(`[^`]+`)/g);
+	const { control } = useForm({ defaultValues: { parts: parts.map(part => ({ text: part })) } });
+	const { fields } = useFieldArray({ control, name: 'parts' });
+	return fields.map(field => {
+		const part = field.text;
 		if (part.startsWith('`') && part.endsWith('`') && part.length > 1) {
-			// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-			return <code key={index}>{part.slice(1, -1)}</code>;
+			return <code key={field.id}>{part.slice(1, -1)}</code>;
 		}
-		// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-		return <span key={index}>{part}</span>;
+		return <span key={field.id}>{part}</span>;
 	});
 }
 
@@ -1213,27 +1220,28 @@ export function YamlBlock(props: { value: unknown }) {
 
 export function YamlTextBlock(props: { value: string; className?: string }) {
 	const text = props.value.replace(/\n$/, '');
-	const lines = text.split('\n');
 	return (
 		<pre
 			className={
 				props.className ? `json-block yaml-block ${props.className}` : 'json-block yaml-block'
 			}
 		>
-			{lines.map((line, index) => (
-				<span
-					className="yaml-line"
-					key={`${
-						// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-						index
-					}-${line}`}
-				>
-					{highlightYamlLine(line)}
-					{index < lines.length - 1 ? '\n' : null}
-				</span>
-			))}
+			{/* Keyed by text so the lines remount with fresh useForm defaults. The <pre> stays mounted, so its scroll position survives. */}
+			<YamlLines key={text} text={text} />
 		</pre>
 	);
+}
+
+function YamlLines(props: { text: string }) {
+	const lines = props.text.split('\n');
+	const { control } = useForm({ defaultValues: { lines: lines.map(line => ({ text: line })) } });
+	const { fields } = useFieldArray({ control, name: 'lines' });
+	return fields.map((field, index) => (
+		<span className="yaml-line" key={field.id}>
+			{highlightYamlLine(field.text)}
+			{index < lines.length - 1 ? '\n' : null}
+		</span>
+	));
 }
 
 function highlightYamlLine(line: string) {

@@ -1,6 +1,15 @@
 import { useBlocker } from '@tanstack/react-router';
 import { Braces, ListChecks, Pencil, Plus, Save, ShieldCheck, Trash2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
+import {
+	type Control,
+	Controller,
+	type UseFormRegister,
+	type UseFormReturn,
+	useController,
+	useFieldArray,
+	useForm
+} from 'react-hook-form';
 
 import azureIcon from '@/assets/providers/azure.svg';
 import bedrockIcon from '@/assets/providers/bedrock.svg';
@@ -77,8 +86,13 @@ type BuiltinGuardDraft = GuardDraftBase & {
 type RegexGuardDraft = GuardDraftBase & {
 	kind: 'regex';
 	action: RegexAction;
-	patterns: string[];
+	// Rows so the pattern list can key each row by its field id; buildRegexGuard
+	// writes them back as strings.
+	patterns: PatternRow[];
 };
+type PatternRow = { value: string };
+// The drawer and editor forms, passed to the field components.
+type GuardForm = { control: Control<GuardDraft>; register: UseFormRegister<GuardDraft> };
 type WebhookGuardDraft = RemoteGuardDraftBase & {
 	kind: 'webhook';
 	target: string;
@@ -290,10 +304,13 @@ function GuardrailsEditor(props: {
 	onSave: (guardrails: LlmGuardrail) => void;
 }) {
 	const initialDraft = useMemo(() => draftFromGuardrails(props.initial), [props.initial]);
-	const [draft, setDraft] = useState<GuardrailDraft>(() => initialDraft);
+	const form = useForm<GuardrailDraft>({ defaultValues: initialDraft });
+	// watch() returns RHF's live values, which it mutates in place. The clone keeps built guards and
+	// the useMergedEdits baseline independent of later edits.
+	const draft = structuredClone(form.watch());
 	const [error, setError] = useState<string | null>(null);
 	const value = buildGuardrails(draft, props.initial);
-	const [initialValue] = useState(value);
+	const [initialValue] = useState(() => buildGuardrails(initialDraft, props.initial));
 	const dirty = !deepEqual(value, initialValue);
 	const blocker = useBlocker({
 		shouldBlockFn: ({ current, next }) => dirty && current.pathname !== next.pathname,
@@ -302,15 +319,14 @@ function GuardrailsEditor(props: {
 	});
 
 	function validate() {
-		const validationError = validateDraft(draft);
+		const validationError = validateDraft(form.getValues());
 		setError(validationError);
 		return !validationError;
 	}
 
-	function applyDraft(nextDraft: GuardrailDraft) {
-		setDraft(nextDraft);
-		const validationError = validateDraft(nextDraft);
-		setError(validationError);
+	// Runs after each change to the guard lists, the only edits that reach the editor draft.
+	function applyDraft() {
+		setError(validateDraft(form.getValues()));
 	}
 
 	function save() {
@@ -340,18 +356,8 @@ function GuardrailsEditor(props: {
 					{props.saveError}
 				</StatusBanner>
 			) : null}
-			<GuardrailSection
-				phase="request"
-				help={props.help}
-				guards={draft.request}
-				onChange={request => applyDraft({ ...draft, request })}
-			/>
-			<GuardrailSection
-				phase="response"
-				help={props.help}
-				guards={draft.response}
-				onChange={response => applyDraft({ ...draft, response })}
-			/>
+			<GuardrailSection phase="request" help={props.help} form={form} onListChange={applyDraft} />
+			<GuardrailSection phase="response" help={props.help} form={form} onListChange={applyDraft} />
 			{dirty ? (
 				<ConfigDiffSaveActions
 					config={props.config}
@@ -385,9 +391,14 @@ function emptyGuardrails(): LlmGuardrail {
 function GuardrailSection(props: {
 	phase: GuardPhase;
 	help: SchemaHelp;
-	guards: GuardDraft[];
-	onChange: (guards: GuardDraft[]) => void;
+	form: UseFormReturn<GuardrailDraft>;
+	onListChange: () => void;
 }) {
+	const { fields, append, remove } = useFieldArray({
+		control: props.form.control,
+		name: props.phase
+	});
+	const guards = props.form.watch(props.phase);
 	const [guardDrawer, setGuardDrawer] = useStickyQueryParam('guard');
 	const [deletingIndex, setDeletingIndex] = useState<number | null>(null);
 	const title = props.phase === 'request' ? 'Request guards' : 'Response guards';
@@ -396,14 +407,10 @@ function GuardrailSection(props: {
 			? 'Inspect prompts before they reach the upstream model.'
 			: 'Inspect model output before it is returned to the caller.';
 	const addOpen = guardDrawer === `${props.phase}:new`;
-	const editingIndex = guardDrawerIndex(guardDrawer, props.phase, props.guards.length);
+	const editingIndex = guardDrawerIndex(guardDrawer, props.phase, fields.length);
 
 	function closeGuardDrawer() {
 		setGuardDrawer(null, 'replace');
-	}
-
-	function patch(index: number, next: GuardDraft) {
-		props.onChange(props.guards.map((guard, guardIndex) => (guardIndex === index ? next : guard)));
 	}
 
 	return (
@@ -418,13 +425,12 @@ function GuardrailSection(props: {
 				</div>
 			</div>
 			<div className="policy-form-section-body">
-				{props.guards.length === 0 ? <p className="muted-copy">No guards configured.</p> : null}
-				{props.guards.map((guard, index) => (
+				{fields.length === 0 ? <p className="muted-copy">No guards configured.</p> : null}
+				{fields.map((field, index) => (
 					<GuardCard
-						// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-						key={index}
+						key={field.id}
 						phase={props.phase}
-						guard={guard}
+						guard={guards[index]}
 						index={index}
 						onEdit={() => setGuardDrawer(`${props.phase}:${index}`)}
 						onRemove={() => setDeletingIndex(index)}
@@ -437,37 +443,42 @@ function GuardrailSection(props: {
 						help={props.help}
 						onClose={closeGuardDrawer}
 						onAdd={guard => {
-							props.onChange([...props.guards, guard]);
+							append(guard);
+							props.onListChange();
 							closeGuardDrawer();
 						}}
 					/>
 				) : null}
-				{editingIndex != null && props.guards[editingIndex] ? (
+				{editingIndex != null && guards[editingIndex] ? (
 					<EditGuardDrawer
+						key={fields[editingIndex].id}
+						control={props.form.control}
+						index={editingIndex}
 						phase={props.phase}
 						help={props.help}
-						guard={props.guards[editingIndex]}
+						guard={guards[editingIndex]}
 						onClose={closeGuardDrawer}
-						onApply={guard => {
-							patch(editingIndex, guard);
+						onApply={() => {
+							props.onListChange();
 							closeGuardDrawer();
 						}}
 					/>
 				) : null}
-				{deletingIndex != null && props.guards[deletingIndex] ? (
+				{deletingIndex != null && guards[deletingIndex] ? (
 					<ConfirmDialog
 						title="Remove guardrail?"
 						destructive
 						confirmLabel="Remove guardrail"
 						onCancel={() => setDeletingIndex(null)}
 						onConfirm={() => {
-							props.onChange(props.guards.filter((_, guardIndex) => guardIndex !== deletingIndex));
+							remove(deletingIndex);
+							props.onListChange();
 							setDeletingIndex(null);
 						}}
 					>
 						<p>
-							Remove the <strong>{guardKindLabel(props.guards[deletingIndex].kind)}</strong> guard?
-							This takes effect immediately.
+							Remove the <strong>{guardKindLabel(guards[deletingIndex].kind)}</strong> guard? This
+							takes effect immediately.
 						</p>
 					</ConfirmDialog>
 				) : null}
@@ -493,14 +504,22 @@ function AddGuardModal(props: {
 }) {
 	const options = props.phase === 'request' ? requestGuardKinds : responseGuardKinds;
 	const schemaPath = ['$defs', props.phase === 'request' ? 'RequestGuard' : 'ResponseGuard'];
+	const { control, register, reset, watch } = useForm<GuardDraft>({
+		defaultValues: emptyGuardDraft()
+	});
+	// watch() returns RHF's live values, which it mutates in place. The clone keeps built guards and
+	// the useMergedEdits baseline independent of later edits.
+	const values = structuredClone(watch());
 	const [kind, setKind] = useState<GuardKind | ''>('');
-	const [guard, setGuard] = useState<GuardDraft | null>(null);
-	const merged = useMergedEdits(undefined, guard ? buildGuard(guard) : undefined, schemaPath);
+	// Whether a guard is being drafted (a type is chosen, or raw YAML is loaded).
+	const [started, setStarted] = useState(false);
+	const merged = useMergedEdits(undefined, started ? buildGuard(values) : undefined, schemaPath);
 
 	function selectKind(value: string) {
-		const nextKind = value as GuardKind;
+		const nextKind = value as GuardKind | '';
 		setKind(nextKind);
-		setGuard(emptyGuardDraft(nextKind));
+		setStarted(nextKind !== '');
+		if (nextKind) reset(emptyGuardDraft(nextKind));
 		merged.reset(undefined);
 	}
 
@@ -508,15 +527,16 @@ function AddGuardModal(props: {
 		<Drawer
 			title={`Add ${props.phase} guard`}
 			onClose={props.onClose}
-			dirty={guard != null}
+			dirty={started}
 			raw={{
 				schemaPath,
 				// Before a type is chosen, raw mode starts from nothing.
 				value: () => merged.value ?? null,
 				onChange: value => {
 					const next = draftFromGuard(value as GuardObject);
-					setGuard(next);
+					reset(next);
 					merged.reset(value);
+					setStarted(true);
 					if (next.kind !== 'unsupported') setKind(next.kind);
 				},
 				empty: buildGuard(emptyGuardDraft())
@@ -528,7 +548,7 @@ function AddGuardModal(props: {
 					</button>
 					<DrawerSaveButton
 						disabled={!merged.value}
-						onClick={() => guard && merged.value && props.onAdd(withValue(guard, merged.value))}
+						onClick={() => started && merged.value && props.onAdd(withValue(values, merged.value))}
 					>
 						<Plus size={16} />
 						Add guard
@@ -547,11 +567,16 @@ function AddGuardModal(props: {
 					onChange={selectKind}
 				/>
 			</FieldGroup>
-			{guard?.kind === 'unsupported' ? (
+			{started && values.kind === 'unsupported' ? (
 				<UnsupportedInForm supports="the guard types and options it lists" />
-			) : guard ? (
+			) : started ? (
 				<section className="guardrail-rule-card compact">
-					<GuardFields phase={props.phase} help={props.help} guard={guard} onChange={setGuard} />
+					<GuardFields
+						phase={props.phase}
+						help={props.help}
+						guard={values as SupportedGuardDraft}
+						form={{ control, register }}
+					/>
 				</section>
 			) : null}
 		</Drawer>
@@ -603,13 +628,24 @@ function GuardCard(props: {
 function EditGuardDrawer(props: {
 	phase: GuardPhase;
 	help: SchemaHelp;
+	control: Control<GuardrailDraft>;
+	index: number;
 	guard: GuardDraft;
 	onClose: () => void;
-	onApply: (guard: GuardDraft) => void;
+	onApply: () => void;
 }) {
 	const schemaPath = ['$defs', props.phase === 'request' ? 'RequestGuard' : 'ResponseGuard'];
-	const [draft, setDraft] = useState<GuardDraft>(props.guard);
+	const { control, register, reset, watch } = useForm<GuardDraft>({ defaultValues: props.guard });
+	// watch() returns RHF's live values, which it mutates in place. The clone keeps built guards and
+	// the useMergedEdits baseline independent of later edits.
+	const draft = structuredClone(watch());
 	const merged = useMergedEdits(buildGuard(props.guard), buildGuard(draft), schemaPath);
+	// The caller keys this drawer by the edited row's field id, so the row name stays valid for its lifetime.
+	// onChange writes the row unconditionally, so a ref-only edit is kept without remounting the card.
+	const { field: row } = useController({
+		control: props.control,
+		name: `${props.phase}.${props.index}` as const
+	});
 
 	return (
 		<Drawer
@@ -620,7 +656,7 @@ function EditGuardDrawer(props: {
 				schemaPath,
 				value: () => merged.value,
 				onChange: value => {
-					setDraft(draftFromGuard(value as GuardObject));
+					reset(draftFromGuard(value as GuardObject));
 					merged.reset(value);
 				},
 				empty: buildGuard(emptyGuardDraft())
@@ -630,7 +666,12 @@ function EditGuardDrawer(props: {
 					<button className="button" type="button" onClick={requestClose}>
 						Cancel
 					</button>
-					<DrawerSaveButton onClick={() => props.onApply(withValue(draft, merged.value))}>
+					<DrawerSaveButton
+						onClick={() => {
+							row.onChange({ target: { value: withValue(draft, merged.value) } });
+							props.onApply();
+						}}
+					>
 						<Save size={16} />
 						Apply changes
 					</DrawerSaveButton>
@@ -648,13 +689,18 @@ function EditGuardDrawer(props: {
 							options={props.phase === 'request' ? requestGuardKinds : responseGuardKinds}
 							schema={props.help.node(schemaPath)}
 							onChange={value => {
-								setDraft(emptyGuardDraft(value));
+								reset(emptyGuardDraft(value));
 								merged.reset(undefined);
 							}}
 						/>
 					</FieldGroup>
 					<section className="guardrail-rule-card compact">
-						<GuardFields phase={props.phase} help={props.help} guard={draft} onChange={setDraft} />
+						<GuardFields
+							phase={props.phase}
+							help={props.help}
+							guard={draft as SupportedGuardDraft}
+							form={{ control, register }}
+						/>
 					</section>
 				</>
 			)}
@@ -665,68 +711,65 @@ function EditGuardDrawer(props: {
 function GuardFields(props: {
 	phase: GuardPhase;
 	help: SchemaHelp;
+	form: GuardForm;
 	guard: SupportedGuardDraft;
-	onChange: (guard: SupportedGuardDraft) => void;
-	patch?: (next: Partial<SupportedGuardDraft>) => void;
 }) {
-	const patch =
-		props.patch ??
-		((next: Partial<SupportedGuardDraft>) =>
-			props.onChange({ ...props.guard, ...next } as SupportedGuardDraft));
 	return (
 		<>
 			{props.guard.kind === 'builtin' ? (
 				<BuiltinGuardFields
 					phase={props.phase}
 					help={props.help}
+					form={props.form}
 					guard={props.guard}
-					onChange={props.onChange}
 				/>
 			) : null}
 			{props.guard.kind === 'regex' ? (
 				<RegexGuardFields
 					phase={props.phase}
 					help={props.help}
+					form={props.form}
 					guard={props.guard}
-					onChange={props.onChange}
 				/>
 			) : null}
 			{props.guard.kind === 'webhook' ? (
-				<WebhookGuardFields help={props.help} guard={props.guard} onChange={patch} />
+				<WebhookGuardFields help={props.help} form={props.form} />
 			) : null}
 			{props.guard.kind === 'openAIModeration' ? (
-				<OpenAIModerationFields help={props.help} guard={props.guard} onChange={patch} />
+				<OpenAIModerationFields help={props.help} form={props.form} />
 			) : null}
 			{props.guard.kind === 'bedrockGuardrails' ? (
-				<BedrockGuardFields help={props.help} guard={props.guard} onChange={patch} />
+				<BedrockGuardFields help={props.help} form={props.form} />
 			) : null}
 			{props.guard.kind === 'googleModelArmor' ? (
-				<GoogleModelArmorFields help={props.help} guard={props.guard} onChange={patch} />
+				<GoogleModelArmorFields help={props.help} form={props.form} />
 			) : null}
 			{props.guard.kind === 'azureContentSafety' ? (
 				<AzureContentSafetyFields
 					phase={props.phase}
 					help={props.help}
+					form={props.form}
 					guard={props.guard}
-					onChange={patch}
 				/>
 			) : null}
 			{props.guard.kind !== 'builtin' && props.guard.kind !== 'regex' ? (
 				<>
-					<RemoteGuardFields help={props.help} guard={props.guard} onChange={patch} />
-					<BackendPoliciesField
-						key={props.guard.kind}
-						help={props.help}
-						value={props.guard.policies}
-						onChange={policies => patch({ policies })}
+					<RemoteGuardFields help={props.help} form={props.form} guard={props.guard} />
+					<Controller
+						control={props.form.control}
+						name="policies"
+						render={({ field }) => (
+							<BackendPoliciesField
+								key={props.guard.kind}
+								help={props.help}
+								value={field.value}
+								// Object values are wrapped: RHF reads an object with a target key as a DOM event.
+								onChange={next => field.onChange({ target: { value: next } })}
+							/>
+						)}
 					/>
 					{props.guard.action === 'reject' ? (
-						<RejectionFields
-							phase={props.phase}
-							help={props.help}
-							guard={props.guard}
-							onChange={patch}
-						/>
+						<RejectionFields phase={props.phase} help={props.help} form={props.form} />
 					) : null}
 				</>
 			) : null}
@@ -737,12 +780,9 @@ function GuardFields(props: {
 function BuiltinGuardFields(props: {
 	phase: GuardPhase;
 	help: SchemaHelp;
+	form: GuardForm;
 	guard: BuiltinGuardDraft;
-	onChange: (guard: SupportedGuardDraft) => void;
 }) {
-	function patch(next: Partial<BuiltinGuardDraft>) {
-		props.onChange({ ...props.guard, ...next });
-	}
 	return (
 		<>
 			<FieldGroup
@@ -750,28 +790,34 @@ function BuiltinGuardFields(props: {
 				path="regex.action"
 				tooltip={props.help.field<RegexRules>('RegexRules', 'action')}
 			>
-				<EnumSelector
-					ariaLabel="Action"
-					value={props.guard.action}
-					options={[
-						{
-							value: 'reject',
-							label: 'Reject request',
-							description: 'Reject the request when a detector matches.'
-						},
-						{
-							value: 'mask',
-							label: 'Mask matched text',
-							description: 'Replace matched content and continue.'
-						},
-						{
-							value: 'audit',
-							label: 'Audit',
-							description: 'Record matches without rejecting or masking.'
-						}
-					]}
-					schema={props.help.node(['$defs', 'RegexRules', 'properties', 'action'])}
-					onChange={value => patch({ action: value })}
+				<Controller
+					control={props.form.control}
+					name="action"
+					render={({ field }) => (
+						<EnumSelector
+							ariaLabel="Action"
+							value={field.value}
+							options={[
+								{
+									value: 'reject',
+									label: 'Reject request',
+									description: 'Reject the request when a detector matches.'
+								},
+								{
+									value: 'mask',
+									label: 'Mask matched text',
+									description: 'Replace matched content and continue.'
+								},
+								{
+									value: 'audit',
+									label: 'Audit',
+									description: 'Record matches without rejecting or masking.'
+								}
+							]}
+							schema={props.help.node(['$defs', 'RegexRules', 'properties', 'action'])}
+							onChange={field.onChange}
+						/>
+					)}
 				/>
 			</FieldGroup>
 			<FieldGroup
@@ -780,35 +826,36 @@ function BuiltinGuardFields(props: {
 				path="regex.rules"
 				tooltip={props.help.field<RegexRules>('RegexRules', 'rules')}
 			>
-				<div className="method-grid">
-					{builtinOptions.map(option => {
-						const selected = props.guard.builtins.includes(option.value);
-						return (
-							<button
-								className={selected ? 'choice-pill active' : 'choice-pill'}
-								type="button"
-								key={option.value}
-								onClick={() =>
-									patch({
-										builtins: selected
-											? props.guard.builtins.filter(item => item !== option.value)
-											: [...props.guard.builtins, option.value]
-									})
-								}
-							>
-								{option.label}
-							</button>
-						);
-					})}
-				</div>
+				<Controller
+					control={props.form.control}
+					name="builtins"
+					render={({ field }) => (
+						<div className="method-grid">
+							{builtinOptions.map(option => {
+								const selected = field.value.includes(option.value);
+								return (
+									<button
+										className={selected ? 'choice-pill active' : 'choice-pill'}
+										type="button"
+										key={option.value}
+										onClick={() =>
+											field.onChange(
+												selected
+													? field.value.filter(item => item !== option.value)
+													: [...field.value, option.value]
+											)
+										}
+									>
+										{option.label}
+									</button>
+								);
+							})}
+						</div>
+					)}
+				/>
 			</FieldGroup>
 			{props.guard.action === 'reject' ? (
-				<RejectionFields
-					phase={props.phase}
-					help={props.help}
-					guard={props.guard}
-					onChange={next => patch(next as Partial<BuiltinGuardDraft>)}
-				/>
+				<RejectionFields phase={props.phase} help={props.help} form={props.form} />
 			) : null}
 		</>
 	);
@@ -817,12 +864,9 @@ function BuiltinGuardFields(props: {
 function RegexGuardFields(props: {
 	phase: GuardPhase;
 	help: SchemaHelp;
+	form: GuardForm;
 	guard: RegexGuardDraft;
-	onChange: (guard: SupportedGuardDraft) => void;
 }) {
-	function patch(next: Partial<RegexGuardDraft>) {
-		props.onChange({ ...props.guard, ...next });
-	}
 	return (
 		<>
 			<FieldGroup
@@ -830,52 +874,45 @@ function RegexGuardFields(props: {
 				path="regex.action"
 				tooltip={props.help.field<RegexRules>('RegexRules', 'action')}
 			>
-				<EnumSelector
-					ariaLabel="Action"
-					value={props.guard.action}
-					options={[
-						{
-							value: 'reject',
-							label: 'Reject request',
-							description: 'Reject the request when a regex matches.'
-						},
-						{
-							value: 'mask',
-							label: 'Mask matched text',
-							description: 'Replace matched content and continue.'
-						},
-						{
-							value: 'audit',
-							label: 'Audit',
-							description: 'Record matches without rejecting or masking.'
-						}
-					]}
-					schema={props.help.node(['$defs', 'RegexRules', 'properties', 'action'])}
-					onChange={value => patch({ action: value })}
+				<Controller
+					control={props.form.control}
+					name="action"
+					render={({ field }) => (
+						<EnumSelector
+							ariaLabel="Action"
+							value={field.value}
+							options={[
+								{
+									value: 'reject',
+									label: 'Reject request',
+									description: 'Reject the request when a regex matches.'
+								},
+								{
+									value: 'mask',
+									label: 'Mask matched text',
+									description: 'Replace matched content and continue.'
+								},
+								{
+									value: 'audit',
+									label: 'Audit',
+									description: 'Record matches without rejecting or masking.'
+								}
+							]}
+							schema={props.help.node(['$defs', 'RegexRules', 'properties', 'action'])}
+							onChange={field.onChange}
+						/>
+					)}
 				/>
 			</FieldGroup>
-			<PatternList
-				help={props.help}
-				patterns={props.guard.patterns}
-				onChange={patterns => patch({ patterns })}
-			/>
+			<PatternList help={props.help} form={props.form} />
 			{props.guard.action === 'reject' ? (
-				<RejectionFields
-					phase={props.phase}
-					help={props.help}
-					guard={props.guard}
-					onChange={next => patch(next as Partial<RegexGuardDraft>)}
-				/>
+				<RejectionFields phase={props.phase} help={props.help} form={props.form} />
 			) : null}
 		</>
 	);
 }
 
-function WebhookGuardFields(props: {
-	help: SchemaHelp;
-	guard: WebhookGuardDraft;
-	onChange: (next: Partial<SupportedGuardDraft>) => void;
-}) {
+function WebhookGuardFields(props: { help: SchemaHelp; form: GuardForm }) {
 	return (
 		<Field
 			label="Webhook target"
@@ -883,24 +920,12 @@ function WebhookGuardFields(props: {
 			tooltip={props.help.field<Webhook>('Webhook', 'target')}
 			hint="Backend host URL for guardrail checks."
 		>
-			<input
-				value={props.guard.target}
-				onChange={event =>
-					props.onChange({
-						target: event.target.value
-					} as Partial<SupportedGuardDraft>)
-				}
-				placeholder="http://guardrail.internal:8080"
-			/>
+			<input {...props.form.register('target')} placeholder="http://guardrail.internal:8080" />
 		</Field>
 	);
 }
 
-function RemoteGuardFields(props: {
-	help: SchemaHelp;
-	guard: RemoteGuardDraft;
-	onChange: (next: Partial<SupportedGuardDraft>) => void;
-}) {
+function RemoteGuardFields(props: { help: SchemaHelp; form: GuardForm; guard: RemoteGuardDraft }) {
 	return (
 		<div className="form-grid">
 			<FieldGroup
@@ -908,27 +933,29 @@ function RemoteGuardFields(props: {
 				path={`${props.guard.kind}.failureMode`}
 				tooltip={props.help.field<Moderation>('Moderation', 'failureMode')}
 			>
-				<EnumSelector
-					ariaLabel="Failure mode"
-					value={props.guard.failureMode}
-					options={[
-						{
-							value: 'failClosed',
-							label: 'Fail closed',
-							description: 'Reject when the provider is unavailable or errors.'
-						},
-						{
-							value: 'failOpen',
-							label: 'Fail open',
-							description: 'Continue when the provider is unavailable or errors.'
-						}
-					]}
-					schema={props.help.node(['$defs', 'Moderation', 'properties', 'failureMode'])}
-					onChange={value =>
-						props.onChange({
-							failureMode: value
-						} as Partial<SupportedGuardDraft>)
-					}
+				<Controller
+					control={props.form.control}
+					name="failureMode"
+					render={({ field }) => (
+						<EnumSelector
+							ariaLabel="Failure mode"
+							value={field.value}
+							options={[
+								{
+									value: 'failClosed',
+									label: 'Fail closed',
+									description: 'Reject when the provider is unavailable or errors.'
+								},
+								{
+									value: 'failOpen',
+									label: 'Fail open',
+									description: 'Continue when the provider is unavailable or errors.'
+								}
+							]}
+							schema={props.help.node(['$defs', 'Moderation', 'properties', 'failureMode'])}
+							onChange={field.onChange}
+						/>
+					)}
 				/>
 			</FieldGroup>
 			<FieldGroup
@@ -936,38 +963,36 @@ function RemoteGuardFields(props: {
 				path={`${props.guard.kind}.action`}
 				tooltip={props.help.field<Moderation>('Moderation', 'action')}
 			>
-				<EnumSelector
-					ariaLabel="Action"
-					value={props.guard.action}
-					options={[
-						{
-							value: 'reject',
-							label: 'Reject',
-							description: 'Enforce the provider verdict.'
-						},
-						{
-							value: 'audit',
-							label: 'Audit',
-							description: 'Record the verdict without blocking.'
-						}
-					]}
-					schema={props.help.node(['$defs', 'Moderation', 'properties', 'action'])}
-					onChange={value =>
-						props.onChange({
-							action: value
-						} as Partial<SupportedGuardDraft>)
-					}
+				<Controller
+					control={props.form.control}
+					name="action"
+					render={({ field }) => (
+						<EnumSelector
+							ariaLabel="Action"
+							value={field.value}
+							options={[
+								{
+									value: 'reject',
+									label: 'Reject',
+									description: 'Enforce the provider verdict.'
+								},
+								{
+									value: 'audit',
+									label: 'Audit',
+									description: 'Record the verdict without blocking.'
+								}
+							]}
+							schema={props.help.node(['$defs', 'Moderation', 'properties', 'action'])}
+							onChange={field.onChange}
+						/>
+					)}
 				/>
 			</FieldGroup>
 		</div>
 	);
 }
 
-function OpenAIModerationFields(props: {
-	help: SchemaHelp;
-	guard: OpenAIModerationGuardDraft;
-	onChange: (next: Partial<SupportedGuardDraft>) => void;
-}) {
+function OpenAIModerationFields(props: { help: SchemaHelp; form: GuardForm }) {
 	return (
 		<Field
 			label="Moderation model"
@@ -975,24 +1000,12 @@ function OpenAIModerationFields(props: {
 			tooltip={props.help.field<Moderation>('Moderation', 'model')}
 			hint="Optional. Defaults to omni-moderation-latest."
 		>
-			<input
-				value={props.guard.model}
-				onChange={event =>
-					props.onChange({
-						model: event.target.value
-					} as Partial<SupportedGuardDraft>)
-				}
-				placeholder="omni-moderation-latest"
-			/>
+			<input {...props.form.register('model')} placeholder="omni-moderation-latest" />
 		</Field>
 	);
 }
 
-function BedrockGuardFields(props: {
-	help: SchemaHelp;
-	guard: BedrockGuardDraft;
-	onChange: (next: Partial<SupportedGuardDraft>) => void;
-}) {
+function BedrockGuardFields(props: { help: SchemaHelp; form: GuardForm }) {
 	return (
 		<div className="form-grid">
 			<Field
@@ -1000,55 +1013,43 @@ function BedrockGuardFields(props: {
 				path="bedrockGuardrails.guardrailIdentifier"
 				tooltip={props.help.field<BedrockGuardrails>('BedrockGuardrails', 'guardrailIdentifier')}
 			>
-				<input
-					value={props.guard.guardrailIdentifier}
-					onChange={event =>
-						props.onChange({
-							guardrailIdentifier: event.target.value
-						} as Partial<SupportedGuardDraft>)
-					}
-				/>
+				<input {...props.form.register('guardrailIdentifier')} />
 			</Field>
 			<Field
 				label="Guardrail version"
 				path="bedrockGuardrails.guardrailVersion"
 				tooltip={props.help.field<BedrockGuardrails>('BedrockGuardrails', 'guardrailVersion')}
 			>
-				<input
-					value={props.guard.guardrailVersion}
-					onChange={event =>
-						props.onChange({
-							guardrailVersion: event.target.value
-						} as Partial<SupportedGuardDraft>)
-					}
-				/>
+				<input {...props.form.register('guardrailVersion')} />
 			</Field>
 			<Field
 				label="AWS region"
 				path="bedrockGuardrails.region"
 				tooltip={props.help.field<BedrockGuardrails>('BedrockGuardrails', 'region')}
 			>
-				<CloudRegionCombobox
-					cloud="aws"
-					ariaLabel="AWS region"
-					value={props.guard.region}
-					onChange={value =>
-						props.onChange({
-							region: value
-						} as Partial<SupportedGuardDraft>)
-					}
-					placeholder="us-west-2"
-				/>
+				{(id, hintId) => (
+					<Controller
+						control={props.form.control}
+						name="region"
+						render={({ field }) => (
+							<CloudRegionCombobox
+								id={id}
+								aria-describedby={hintId}
+								cloud="aws"
+								ariaLabel="AWS region"
+								value={field.value}
+								onChange={field.onChange}
+								placeholder="us-west-2"
+							/>
+						)}
+					/>
+				)}
 			</Field>
 		</div>
 	);
 }
 
-function GoogleModelArmorFields(props: {
-	help: SchemaHelp;
-	guard: GoogleModelArmorGuardDraft;
-	onChange: (next: Partial<SupportedGuardDraft>) => void;
-}) {
+function GoogleModelArmorFields(props: { help: SchemaHelp; form: GuardForm }) {
 	return (
 		<div className="form-grid">
 			<Field
@@ -1056,28 +1057,14 @@ function GoogleModelArmorFields(props: {
 				path="googleModelArmor.templateId"
 				tooltip={props.help.field<GoogleModelArmor>('GoogleModelArmor', 'templateId')}
 			>
-				<input
-					value={props.guard.templateId}
-					onChange={event =>
-						props.onChange({
-							templateId: event.target.value
-						} as Partial<SupportedGuardDraft>)
-					}
-				/>
+				<input {...props.form.register('templateId')} />
 			</Field>
 			<Field
 				label="Project ID"
 				path="googleModelArmor.projectId"
 				tooltip={props.help.field<GoogleModelArmor>('GoogleModelArmor', 'projectId')}
 			>
-				<input
-					value={props.guard.projectId}
-					onChange={event =>
-						props.onChange({
-							projectId: event.target.value
-						} as Partial<SupportedGuardDraft>)
-					}
-				/>
+				<input {...props.form.register('projectId')} />
 			</Field>
 			<Field
 				label="Location"
@@ -1085,17 +1072,23 @@ function GoogleModelArmorFields(props: {
 				tooltip={props.help.field<GoogleModelArmor>('GoogleModelArmor', 'location')}
 				hint="Optional. Defaults to us-central1."
 			>
-				<CloudRegionCombobox
-					cloud="google"
-					ariaLabel="Location"
-					value={props.guard.location}
-					onChange={value =>
-						props.onChange({
-							location: value
-						} as Partial<SupportedGuardDraft>)
-					}
-					placeholder="us-central1"
-				/>
+				{(id, hintId) => (
+					<Controller
+						control={props.form.control}
+						name="location"
+						render={({ field }) => (
+							<CloudRegionCombobox
+								id={id}
+								aria-describedby={hintId}
+								cloud="google"
+								ariaLabel="Location"
+								value={field.value}
+								onChange={field.onChange}
+								placeholder="us-central1"
+							/>
+						)}
+					/>
+				)}
 			</Field>
 		</div>
 	);
@@ -1104,8 +1097,8 @@ function GoogleModelArmorFields(props: {
 function AzureContentSafetyFields(props: {
 	phase: GuardPhase;
 	help: SchemaHelp;
+	form: GuardForm;
 	guard: AzureContentSafetyGuardDraft;
-	onChange: (next: Partial<SupportedGuardDraft>) => void;
 }) {
 	return (
 		<>
@@ -1115,12 +1108,7 @@ function AzureContentSafetyFields(props: {
 				tooltip={props.help.field<AzureContentSafety>('AzureContentSafety', 'endpoint')}
 			>
 				<input
-					value={props.guard.endpoint}
-					onChange={event =>
-						props.onChange({
-							endpoint: event.target.value
-						} as Partial<SupportedGuardDraft>)
-					}
+					{...props.form.register('endpoint')}
 					placeholder="resource.cognitiveservices.azure.com"
 				/>
 			</Field>
@@ -1131,30 +1119,14 @@ function AzureContentSafetyFields(props: {
 					tooltip={props.help.field<AnalyzeTextConfig>('AnalyzeTextConfig', 'severityThreshold')}
 					hint="Optional. 0-6; default is 2."
 				>
-					<input
-						value={props.guard.severityThreshold}
-						onChange={event =>
-							props.onChange({
-								severityThreshold: event.target.value
-							} as Partial<SupportedGuardDraft>)
-						}
-						placeholder="2"
-					/>
+					<input {...props.form.register('severityThreshold')} placeholder="2" />
 				</Field>
 				<Field
 					label="Analyze API version"
 					path="azureContentSafety.analyzeText.apiVersion"
 					tooltip={props.help.field<AnalyzeTextConfig>('AnalyzeTextConfig', 'apiVersion')}
 				>
-					<input
-						value={props.guard.analyzeApiVersion}
-						onChange={event =>
-							props.onChange({
-								analyzeApiVersion: event.target.value
-							} as Partial<SupportedGuardDraft>)
-						}
-						placeholder="2024-09-01"
-					/>
+					<input {...props.form.register('analyzeApiVersion')} placeholder="2024-09-01" />
 				</Field>
 				<Field
 					label="Blocklists"
@@ -1162,40 +1134,17 @@ function AzureContentSafetyFields(props: {
 					tooltip={props.help.field<AnalyzeTextConfig>('AnalyzeTextConfig', 'blocklistNames')}
 					hint="Comma-separated names."
 				>
-					<input
-						value={props.guard.blocklistNames}
-						onChange={event =>
-							props.onChange({
-								blocklistNames: event.target.value
-							} as Partial<SupportedGuardDraft>)
-						}
-					/>
+					<input {...props.form.register('blocklistNames')} />
 				</Field>
 			</div>
 			<label className="native-toggle">
-				<input
-					type="checkbox"
-					checked={props.guard.haltOnBlocklistHit}
-					onChange={event =>
-						props.onChange({
-							haltOnBlocklistHit: event.target.checked
-						} as Partial<SupportedGuardDraft>)
-					}
-				/>
+				<input type="checkbox" {...props.form.register('haltOnBlocklistHit')} />
 				<span>Halt on blocklist hit</span>
 			</label>
 			{props.phase === 'request' ? (
 				<>
 					<label className="native-toggle">
-						<input
-							type="checkbox"
-							checked={props.guard.detectJailbreak}
-							onChange={event =>
-								props.onChange({
-									detectJailbreak: event.target.checked
-								} as Partial<SupportedGuardDraft>)
-							}
-						/>
+						<input type="checkbox" {...props.form.register('detectJailbreak')} />
 						<span>Detect jailbreak attempts</span>
 					</label>
 					{props.guard.detectJailbreak ? (
@@ -1208,12 +1157,7 @@ function AzureContentSafetyFields(props: {
 							)}
 						>
 							<input
-								value={props.guard.jailbreakApiVersion}
-								onChange={event =>
-									props.onChange({
-										jailbreakApiVersion: event.target.value
-									} as Partial<SupportedGuardDraft>)
-								}
+								{...props.form.register('jailbreakApiVersion')}
 								placeholder="2024-02-15-preview"
 							/>
 						</Field>
@@ -1224,12 +1168,7 @@ function AzureContentSafetyFields(props: {
 	);
 }
 
-function RejectionFields(props: {
-	phase: GuardPhase;
-	help: SchemaHelp;
-	guard: GuardDraftBase;
-	onChange: (next: Partial<SupportedGuardDraft>) => void;
-}) {
+function RejectionFields(props: { phase: GuardPhase; help: SchemaHelp; form: GuardForm }) {
 	return (
 		<div className="form-grid">
 			<Field
@@ -1241,15 +1180,7 @@ function RejectionFields(props: {
 						: props.help.field<RequestRejection1>('RequestRejection1', 'status')
 				}
 			>
-				<input
-					value={props.guard.rejectionStatus}
-					onChange={event =>
-						props.onChange({
-							rejectionStatus: event.target.value
-						} as Partial<SupportedGuardDraft>)
-					}
-					placeholder="403"
-				/>
+				<input {...props.form.register('rejectionStatus')} placeholder="403" />
 			</Field>
 			<Field
 				label="Rejection body"
@@ -1270,12 +1201,7 @@ function RejectionFields(props: {
 			>
 				<textarea
 					rows={4}
-					value={props.guard.rejectionBody}
-					onChange={event =>
-						props.onChange({
-							rejectionBody: event.target.value
-						} as Partial<SupportedGuardDraft>)
-					}
+					{...props.form.register('rejectionBody')}
 					placeholder="The request was rejected due to inappropriate content"
 				/>
 			</Field>
@@ -1283,11 +1209,11 @@ function RejectionFields(props: {
 	);
 }
 
-function PatternList(props: {
-	help: SchemaHelp;
-	patterns: string[];
-	onChange: (patterns: string[]) => void;
-}) {
+function PatternList(props: { help: SchemaHelp; form: GuardForm }) {
+	const { fields, append, remove } = useFieldArray({
+		control: props.form.control,
+		name: 'patterns'
+	});
 	return (
 		<FieldGroup
 			className="guardrail-pattern-list"
@@ -1295,38 +1221,24 @@ function PatternList(props: {
 			path="regex.rules"
 			tooltip={props.help.field<RegexRules>('RegexRules', 'rules')}
 		>
-			{props.patterns.map((pattern, index) => (
-				// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-				<div className="guardrail-pattern-row" key={index}>
+			{fields.map((field, index) => (
+				<div className="guardrail-pattern-row" key={field.id}>
 					<input
 						className="mono-input"
-						value={pattern}
-						onChange={event =>
-							props.onChange(
-								props.patterns.map((item, itemIndex) =>
-									itemIndex === index ? event.target.value : item
-								)
-							)
-						}
+						{...props.form.register(`patterns.${index}.value`)}
 						placeholder="(?i)secret-[a-z0-9]+"
 					/>
 					<button
 						className="icon-button danger guardrail-pattern-remove"
 						type="button"
 						aria-label="Remove pattern"
-						onClick={() =>
-							props.onChange(props.patterns.filter((_, itemIndex) => itemIndex !== index))
-						}
+						onClick={() => remove(index)}
 					>
 						<Trash2 size={16} />
 					</button>
 				</div>
 			))}
-			<button
-				className="button"
-				type="button"
-				onClick={() => props.onChange([...props.patterns, ''])}
-			>
+			<button className="button" type="button" onClick={() => append({ value: '' })}>
 				<Plus size={16} />
 				Add pattern
 			</button>
@@ -1355,7 +1267,9 @@ function parseGuard(guard: GuardObject): GuardDraft {
 		const builtins = rules.flatMap(rule =>
 			'builtin' in rule ? [rule.builtin as BuiltinRule] : []
 		);
-		const patterns = rules.flatMap(rule => ('pattern' in rule ? [String(rule.pattern)] : []));
+		const patterns = rules.flatMap(rule =>
+			'pattern' in rule ? [{ value: String(rule.pattern) }] : []
+		);
 		// The form edits either built-in detectors or patterns; a guard with both
 		// (or neither) is edited as raw YAML.
 		if (Boolean(builtins.length) === Boolean(patterns.length))
@@ -1583,8 +1497,9 @@ function buildRegexGuard(guard: RegexGuardDraft): GuardObject {
 		regex: {
 			action: guard.action,
 			rules: guard.patterns
-				.filter(pattern => pattern.trim())
-				.map(pattern => ({ pattern: pattern.trim() }))
+				.map(row => row.value.trim())
+				.filter(pattern => pattern)
+				.map(pattern => ({ pattern }))
 		}
 	});
 }
@@ -1609,7 +1524,7 @@ function emptyGuardDraft(kind: GuardKind = 'builtin'): SupportedGuardDraft {
 		case 'builtin':
 			return { ...base, kind, action: 'reject', builtins: ['email'] };
 		case 'regex':
-			return { ...base, kind, action: 'reject', patterns: [''] };
+			return { ...base, kind, action: 'reject', patterns: [{ value: '' }] };
 		case 'webhook':
 			return { ...remote, kind, target: '' };
 		case 'openAIModeration':
@@ -1646,7 +1561,7 @@ function validateDraft(draft: GuardrailDraft) {
 		if (guard.kind === 'builtin' && guard.builtins.length === 0) {
 			return 'Each built-in detector guard needs at least one detector.';
 		}
-		if (guard.kind === 'regex' && guard.patterns.every(pattern => !pattern.trim())) {
+		if (guard.kind === 'regex' && guard.patterns.every(pattern => !pattern.value.trim())) {
 			return 'Each custom regex guard needs at least one pattern.';
 		}
 		if (guard.kind === 'webhook' && !guard.target.trim()) return 'Webhook guards require a target.';
@@ -1739,7 +1654,7 @@ function guardSummary(guard: GuardDraft) {
 		case 'builtin':
 			return `${capitalize(guard.action)} ${guard.builtins.length} built-in detector${guard.builtins.length === 1 ? '' : 's'}.${rejection}`;
 		case 'regex':
-			return `${capitalize(guard.action)} ${guard.patterns.filter(pattern => pattern.trim()).length} regex pattern${guard.patterns.filter(pattern => pattern.trim()).length === 1 ? '' : 's'}.${rejection}`;
+			return `${capitalize(guard.action)} ${guard.patterns.filter(pattern => pattern.value.trim()).length} regex pattern${guard.patterns.filter(pattern => pattern.value.trim()).length === 1 ? '' : 's'}.${rejection}`;
 		case 'webhook':
 			return guard.target.trim()
 				? `${guard.target.trim()} · ${guard.failureMode === 'failOpen' ? 'fail open' : 'fail closed'}.${rejection}`

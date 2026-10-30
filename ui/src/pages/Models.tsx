@@ -12,6 +12,14 @@ import {
 } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { useEffect, useMemo, useState } from 'react';
+import {
+	type Control,
+	Controller,
+	useController,
+	useFieldArray,
+	useForm,
+	useWatch
+} from 'react-hook-form';
 
 import { CatalogModelSelector } from '@/components/CatalogModelSelector';
 import { ConfigDiffSaveActions } from '@/components/ConfigDiffDrawer';
@@ -65,7 +73,12 @@ import {
 	selectedConfiguredModelName
 } from '@/modelResolution';
 import { DumpModelsView } from '@/pages/models/DumpModelsView';
-import { ModelMatchesEditor, normalizeMatches } from '@/pages/models/ModelMatchesEditor';
+import {
+	buildModelMatches,
+	ModelMatchesEditor,
+	normalizeMatches,
+	splitModelMatches
+} from '@/pages/models/ModelMatchesEditor';
 import {
 	HeaderModifierEditor,
 	HealthPolicyEditor,
@@ -579,7 +592,7 @@ function ModelsEditorPage() {
 	);
 }
 
-type ModelForm = ReturnType<typeof modelFormFrom>;
+export type ModelForm = ReturnType<typeof modelFormFrom>;
 
 // The form state for a model: from the saved config, or from raw mode. A model
 // without a name matches its provider's default name until one is entered.
@@ -587,10 +600,15 @@ function modelFormFrom(model: LlmModel) {
 	return {
 		// The model itself, for which policy sections start open.
 		source: model,
-		model:
-			model.name || !model.provider
+		// The saved matches come from matchRows and matchHeaders. The `matches` key only
+		// keeps the saved position of `matches` in the model object.
+		model: {
+			...(model.name || !model.provider
 				? model
-				: { ...model, name: defaultIncomingModelMatch(model.provider) },
+				: { ...model, name: defaultIncomingModelMatch(model.provider) }),
+			matches: undefined
+		},
+		...splitModelMatches(model.matches),
 		autoModelMatch: !model.name,
 		upstreamMode: initialUpstreamMode(model),
 		explicitModel: model.params?.model ?? '',
@@ -619,8 +637,14 @@ function ModelEditor(props: {
 	onCancel: () => void;
 	onSave: (model: LlmModel, previousId?: string) => void;
 }) {
-	const [form, setForm] = useState(() => modelFormFrom(props.initial));
-	const [initialForm] = useState(form);
+	const [initialForm] = useState(() => modelFormFrom(props.initial));
+	const [initialDraft] = useState(() => JSON.stringify(initialForm));
+	const { control, getValues, register, reset, setValue, watch } = useForm<ModelForm>({
+		defaultValues: initialForm
+	});
+	// watch() returns RHF's live values, which it mutates in place. The clone keeps builders and
+	// the useMergedEdits baseline independent of later edits.
+	const form = structuredClone(watch());
 	const {
 		source,
 		model,
@@ -637,6 +661,35 @@ function ModelEditor(props: {
 		promptCaching,
 		authorization
 	} = form;
+	// RHF reads any object with a `target` key as a DOM event, so object values
+	// are passed inside an event-shaped wrapper to be stored unchanged.
+	const upstreamModeField = useController({ control, name: 'upstreamMode' }).field;
+	const explicitModelField = useController({ control, name: 'explicitModel' }).field;
+	const customModelExpressionField = useController({
+		control,
+		name: 'customModelExpression'
+	}).field;
+	const transformationField = useController({ control, name: 'transformation' }).field;
+	const finalTransformationField = useController({ control, name: 'finalTransformation' }).field;
+	const healthField = useController({ control, name: 'health' }).field;
+	const defaultsTextField = useController({ control, name: 'defaultsText' }).field;
+	const overridesTextField = useController({ control, name: 'overridesText' }).field;
+	const requestHeadersField = useController({ control, name: 'requestHeaders' }).field;
+	const responseHeadersField = useController({ control, name: 'responseHeaders' }).field;
+	const promptCachingField = useController({ control, name: 'promptCaching' }).field;
+	const authorizationField = useController({ control, name: 'authorization' }).field;
+	const providerField = useController({ control, name: 'model.provider' }).field;
+	const paramsField = useController({ control, name: 'model.params' }).field;
+	const authField = useController({ control, name: 'model.auth' }).field;
+	const nameInput = register('model.name', {
+		onChange: event => {
+			const name = event.target.value;
+			setValue(
+				'autoModelMatch',
+				!name.trim() || name === defaultIncomingModelMatch(model.provider)
+			);
+		}
+	});
 	const [policyError, setPolicyError] = useState<string | null>(null);
 	const [saveAttempted, setSaveAttempted] = useState(false);
 	const warnings = modelWarnings(model);
@@ -664,7 +717,7 @@ function ModelEditor(props: {
 					{
 						...model,
 						...policyPatch.value,
-						matches: normalizeMatches(model.matches)
+						matches: normalizeMatches(buildModelMatches(form))
 					},
 					upstreamMode,
 					explicitModel,
@@ -678,8 +731,21 @@ function ModelEditor(props: {
 	const preview = merged.value;
 	const providerSelected = Boolean(model.provider);
 
-	function update(patch: Partial<ModelForm>) {
-		setForm(current => ({ ...current, ...patch }));
+	// Picking a provider also moves the incoming model match to that provider's
+	// default, unless the user has typed their own match.
+	function changeProvider(provider: LlmModel['provider'], params: LlmModel['params']) {
+		const current = getValues();
+		const currentDefault = defaultIncomingModelMatch(current.model.provider);
+		const nextDefault = defaultIncomingModelMatch(provider);
+		const shouldUseDefault =
+			current.autoModelMatch || !current.model.name.trim() || current.model.name === currentDefault;
+		setValue('autoModelMatch', current.autoModelMatch || shouldUseDefault);
+		if (!props.previousId && shouldUseDefault && stripPrefixCandidate(nextDefault)) {
+			setValue('upstreamMode', 'strip');
+		}
+		providerField.onChange({ target: { value: provider } });
+		paramsField.onChange({ target: { value: params } });
+		if (shouldUseDefault) setValue('model.name', nextDefault);
 	}
 
 	function save() {
@@ -710,14 +776,14 @@ function ModelEditor(props: {
 		<Drawer
 			title={props.previousId ? 'Edit model' : 'Add model'}
 			onClose={props.onCancel}
-			dirty={JSON.stringify(form) !== JSON.stringify(initialForm)}
+			dirty={JSON.stringify(form) !== initialDraft}
 			saving={props.saving}
 			error={props.saveError}
 			raw={{
 				schemaPath: ['$defs', 'LocalLLMModels'],
 				value: () => preview ?? model,
 				onChange: value => {
-					setForm(modelFormFrom(value as LlmModel));
+					reset(modelFormFrom(value as LlmModel));
 					merged.reset(value);
 				},
 				empty: makeEmptyModel()
@@ -782,14 +848,7 @@ function ModelEditor(props: {
 					)}
 				>
 					<input
-						value={model.name}
-						onChange={event => {
-							const name = event.target.value;
-							update({
-								model: { ...model, name },
-								autoModelMatch: !name.trim() || name === defaultIncomingModelMatch(model.provider)
-							});
-						}}
+						{...nameInput}
 						placeholder={model.provider ? defaultIncomingModelMatch(model.provider) : 'openai/*'}
 					/>
 				</Field>
@@ -804,9 +863,7 @@ function ModelEditor(props: {
 				>
 					<input
 						value={model.displayName ?? ''}
-						onChange={event =>
-							update({ model: { ...model, displayName: event.target.value || undefined } })
-						}
+						onChange={event => setValue('model.displayName', event.target.value || undefined)}
 						placeholder="Defaults to the model match"
 					/>
 				</Field>
@@ -819,36 +876,9 @@ function ModelEditor(props: {
 				providers={props.providers}
 				help={props.help}
 				apiKeyError={providerApiKeyError}
-				onProviderChange={(provider, params) =>
-					setForm(current => {
-						const currentDefault = defaultIncomingModelMatch(current.model.provider);
-						const nextDefault = defaultIncomingModelMatch(provider);
-						const shouldUseDefault =
-							current.autoModelMatch ||
-							!current.model.name.trim() ||
-							current.model.name === currentDefault;
-						return {
-							...current,
-							autoModelMatch: current.autoModelMatch || shouldUseDefault,
-							upstreamMode:
-								!props.previousId && shouldUseDefault && stripPrefixCandidate(nextDefault)
-									? 'strip'
-									: current.upstreamMode,
-							model: {
-								...current.model,
-								provider,
-								params,
-								name: shouldUseDefault ? nextDefault : current.model.name
-							}
-						};
-					})
-				}
-				onParamsChange={params =>
-					setForm(current => ({ ...current, model: { ...current.model, params } }))
-				}
-				onAuthChange={auth =>
-					setForm(current => ({ ...current, model: { ...current.model, auth } }))
-				}
+				onProviderChange={changeProvider}
+				onParamsChange={params => paramsField.onChange({ target: { value: params } })}
+				onAuthChange={auth => authField.onChange({ target: { value: auth } })}
 			/>
 
 			{providerSelected ? (
@@ -862,9 +892,9 @@ function ModelEditor(props: {
 							model.provider ? resolvedProviderLabel(model.provider, props.providers) : null
 						}
 						help={props.help}
-						setMode={value => update({ upstreamMode: value })}
-						setExplicitModel={value => update({ explicitModel: value })}
-						setCustomModelExpression={value => update({ customModelExpression: value })}
+						setMode={upstreamModeField.onChange}
+						setExplicitModel={explicitModelField.onChange}
+						setCustomModelExpression={customModelExpressionField.onChange}
 					/>
 
 					<CollapsiblePolicySection
@@ -873,10 +903,7 @@ function ModelEditor(props: {
 						description="Match conditions and model-specific policies"
 					>
 						<div className="policy-editor-stack">
-							<ModelMatchesEditor
-								matches={model.matches ?? []}
-								onChange={matches => update({ model: { ...model, matches } })}
-							/>
+							<ModelMatchesEditor control={control} setValue={setValue} />
 
 							<ModelPoliciesInline
 								model={source}
@@ -890,15 +917,17 @@ function ModelEditor(props: {
 								responseHeaders={responseHeaders}
 								promptCaching={promptCaching}
 								authorization={authorization}
-								setTransformation={value => update({ transformation: value })}
-								setFinalTransformation={value => update({ finalTransformation: value })}
-								setHealth={value => update({ health: value })}
-								setDefaultsText={value => update({ defaultsText: value })}
-								setOverridesText={value => update({ overridesText: value })}
-								setRequestHeaders={value => update({ requestHeaders: value })}
-								setResponseHeaders={value => update({ responseHeaders: value })}
-								setPromptCaching={value => update({ promptCaching: value })}
-								setAuthorization={value => update({ authorization: value })}
+								setTransformation={value => transformationField.onChange({ target: { value } })}
+								setFinalTransformation={value =>
+									finalTransformationField.onChange({ target: { value } })
+								}
+								setHealth={value => healthField.onChange({ target: { value } })}
+								setDefaultsText={defaultsTextField.onChange}
+								setOverridesText={overridesTextField.onChange}
+								setRequestHeaders={value => requestHeadersField.onChange({ target: { value } })}
+								setResponseHeaders={value => responseHeadersField.onChange({ target: { value } })}
+								setPromptCaching={value => promptCachingField.onChange({ target: { value } })}
+								setAuthorization={value => authorizationField.onChange({ target: { value } })}
 							/>
 						</div>
 					</CollapsiblePolicySection>
@@ -1262,6 +1291,66 @@ function modelPolicySummary(model: Partial<LlmModel>) {
 	return policies.length ? `${policies.length} configured` : 'No model policies configured';
 }
 
+type VirtualWeightedTarget = NonNullable<LlmVirtualModel['routing']['weighted']>['targets'][number];
+type VirtualFailoverTarget = NonNullable<LlmVirtualModel['routing']['failover']>['targets'][number];
+type VirtualTargetOptions = ReturnType<typeof modelTargetOptions>;
+
+// The virtual model form. Each strategy keeps its targets in its own field
+// array, so rows keep their ids when a sibling is removed. Failover targets are
+// one flat list, owned by a `failoverGroups` row (their owner is its index). `model.routing` is
+// the loaded routing: it is used only when no strategy is set, and otherwise
+// the saved routing replaces it in place, so the saved key order is unchanged.
+type VirtualModelForm = {
+	model: LlmVirtualModel;
+	strategy: VirtualRoutingStrategy | undefined;
+	weightedTargets: VirtualWeightedTarget[];
+	failoverGroups: Array<Record<string, never>>;
+	failoverTargets: Array<VirtualFailoverTarget & { owner: number }>;
+	conditionalTargets: ConditionalVirtualTarget[];
+};
+
+function virtualModelFormFrom(model: LlmVirtualModel): VirtualModelForm {
+	const routing = model.routing;
+	return {
+		model,
+		strategy: routingStrategy(routing),
+		weightedTargets: routing.weighted?.targets ?? [],
+		failoverGroups: failoverTargetGroups(routing.failover?.targets ?? []).map(() => ({})),
+		failoverTargets: failoverTargetGroups(routing.failover?.targets ?? []).flatMap(
+			(targets, owner) => targets.map(target => ({ owner, ...target }))
+		),
+		conditionalTargets: routing.conditional?.targets ?? []
+	};
+}
+
+function routingStrategy(routing: LlmVirtualModel['routing']): VirtualRoutingStrategy | undefined {
+	if (routing.conditional) return 'conditional';
+	if (routing.failover) return 'failover';
+	if (routing.weighted) return 'weighted';
+	return undefined;
+}
+
+function buildVirtualModel(form: VirtualModelForm): LlmVirtualModel {
+	return { ...form.model, routing: buildVirtualRouting(form) };
+}
+
+// Failover priorities are stored on each target and renumbered by the editor
+// on every failover edit, so untouched targets keep their saved priority.
+function buildVirtualRouting(form: VirtualModelForm): LlmVirtualModel['routing'] {
+	switch (form.strategy) {
+		case 'weighted':
+			return { weighted: { targets: form.weightedTargets } };
+		case 'failover':
+			return {
+				failover: { targets: form.failoverTargets.map(({ owner: _owner, ...target }) => target) }
+			};
+		case 'conditional':
+			return { conditional: { targets: form.conditionalTargets } };
+		default:
+			return form.model.routing;
+	}
+}
+
 function VirtualModelEditor(props: {
 	initial: LlmVirtualModel;
 	config?: GatewayConfig;
@@ -1275,17 +1364,20 @@ function VirtualModelEditor(props: {
 	onCancel: () => void;
 	onSave: (model: LlmVirtualModel, previousName?: string) => void;
 }) {
-	const [model, setModel] = useState<LlmVirtualModel>(props.initial);
-	const strategy: VirtualRoutingStrategy | undefined = model.routing.conditional
-		? 'conditional'
-		: model.routing.failover
-			? 'failover'
-			: model.routing.weighted
-				? 'weighted'
-				: undefined;
-	const weightedTargets = model.routing.weighted?.targets ?? [];
-	const failoverTargets = model.routing.failover?.targets ?? [];
-	const conditionalTargets = model.routing.conditional?.targets ?? [];
+	const [initialForm] = useState(() => virtualModelFormFrom(props.initial));
+	const [initialDraft] = useState(() => JSON.stringify(initialForm));
+	const { control, getValues, register, reset, setValue, watch } = useForm<VirtualModelForm>({
+		defaultValues: initialForm
+	});
+	// watch() returns RHF's live values, which it mutates in place. The clone keeps builders and
+	// the useMergedEdits baseline independent of later edits.
+	const form = structuredClone(watch());
+	const model = buildVirtualModel(form);
+	const strategy = form.strategy;
+	const weighted = useFieldArray({ control, name: 'weightedTargets' });
+	const failoverGroups = useFieldArray({ control, name: 'failoverGroups' });
+	const failover = useFieldArray({ control, name: 'failoverTargets' });
+	const conditional = useFieldArray({ control, name: 'conditionalTargets' });
 	const targetOptions = modelTargetOptions(props.baseModels, props.providers);
 	const merged = useMergedEdits(
 		props.previousName ? props.initial : undefined,
@@ -1295,120 +1387,111 @@ function VirtualModelEditor(props: {
 	const preview = merged.value;
 	const activeTargets =
 		strategy === 'weighted'
-			? weightedTargets
+			? form.weightedTargets
 			: strategy === 'failover'
-				? failoverTargets
-				: conditionalTargets;
+				? form.failoverTargets
+				: form.conditionalTargets;
 	const hasInvalidTarget = activeTargets.some(
 		target => !target.model.trim() || isIncompleteWildcardTarget(target.model, props.baseModels)
 	);
 	const hasInvalidConditionalFallback =
 		strategy === 'conditional' &&
-		conditionalTargets.some(
-			(target, index) => !target.when?.trim() && index !== conditionalTargets.length - 1
+		form.conditionalTargets.some(
+			(target, index) => !target.when?.trim() && index !== form.conditionalTargets.length - 1
 		);
-	const failoverGroups = failoverTargetGroups(failoverTargets);
 	const defaultTarget = defaultVirtualTargetModel(props.baseModels);
 	const saveDisabled =
 		props.saving ||
 		(strategy !== undefined &&
 			(activeTargets.length === 0 || hasInvalidTarget || hasInvalidConditionalFallback));
-	const [initialDraft] = useState(() => JSON.stringify(model));
+
+	// Failover priority is the group position. Each target's priority is written
+	// in place, so rows keep their field ids.
+	function renumberFailover() {
+		getValues('failoverTargets').forEach((target, position) => {
+			setValue(`failoverTargets.${position}.priority`, target.owner);
+		});
+	}
 
 	function setStrategy(next: VirtualRoutingStrategy) {
-		if (next === 'weighted') {
-			setModel(current => ({
-				...current,
-				routing: {
-					weighted: {
-						targets: current.routing.weighted?.targets?.length
-							? current.routing.weighted.targets
-							: [{ model: defaultTarget, weight: 1 }]
-					}
-				}
-			}));
+		setValue('strategy', next);
+		if (next !== 'weighted') weighted.remove();
+		if (next !== 'failover') {
+			failover.remove();
+			failoverGroups.remove();
+		}
+		if (next !== 'conditional') conditional.remove();
+		if (next === 'weighted' && !getValues('weightedTargets').length)
+			weighted.append({ model: defaultTarget, weight: 1 });
+		if (next === 'failover' && !getValues('failoverTargets').length) {
+			failoverGroups.append({});
+			failover.append({ owner: 0, model: defaultTarget, priority: 0 });
+		}
+		if (next === 'conditional' && !getValues('conditionalTargets').length)
+			conditional.append([
+				{ when: 'json(request.body).route == "default"', model: defaultTarget },
+				{ model: defaultTarget }
+			]);
+	}
+
+	function addFailoverGroup() {
+		const owner = getValues('failoverGroups').length;
+		failoverGroups.append({});
+		failover.append({ owner, model: defaultTarget, priority: owner });
+		renumberFailover();
+	}
+
+	// Targets owned by later groups move down one owner, then the group's targets
+	// and group row are removed. The owner rewrites are primitive leaves, so they
+	// do not touch the row ids.
+	function removeFailoverGroup(groupIndex: number) {
+		const owned: number[] = [];
+		getValues('failoverTargets').forEach((target, position) => {
+			if (target.owner === groupIndex) owned.push(position);
+			if (target.owner > groupIndex) {
+				setValue(`failoverTargets.${position}.owner`, target.owner - 1);
+			}
+		});
+		failover.remove(owned);
+		failoverGroups.remove(groupIndex);
+		renumberFailover();
+	}
+
+	// Removing a group's last target removes the group, so no group is left empty.
+	function removeFailoverTarget(position: number) {
+		const targets = getValues('failoverTargets');
+		const owner = targets[position].owner;
+		if (targets.filter(target => target.owner === owner).length === 1) {
+			removeFailoverGroup(owner);
 			return;
 		}
-		if (next === 'conditional') {
-			setModel(current => ({
-				...current,
-				routing: {
-					conditional: {
-						targets: current.routing.conditional?.targets?.length
-							? current.routing.conditional.targets
-							: [
-									{
-										when: 'json(request.body).route == "default"',
-										model: defaultTarget
-									},
-									{ model: defaultTarget }
-								]
-					}
-				}
-			}));
-			return;
-		}
-		setModel(current => ({
-			...current,
-			routing: {
-				failover: {
-					targets: current.routing.failover?.targets?.length
-						? current.routing.failover.targets
-						: [{ model: defaultTarget, priority: 0 }]
-				}
-			}
-		}));
+		failover.remove(position);
+		renumberFailover();
 	}
 
-	function updateWeighted(
-		index: number,
-		patch: Partial<NonNullable<LlmVirtualModel['routing']['weighted']>['targets'][number]>
-	) {
-		setModel(current => {
-			const targets = [...(current.routing.weighted?.targets ?? [])];
-			targets[index] = { ...targets[index], ...patch };
-			return { ...current, routing: { weighted: { targets } } };
-		});
-	}
-
-	function updateFailoverGroups(
-		groups: Array<Array<NonNullable<LlmVirtualModel['routing']['failover']>['targets'][number]>>
-	) {
-		setModel(current => ({
-			...current,
-			routing: {
-				failover: {
-					targets: groups.flatMap((group, priority) =>
-						group.map(target => ({ ...target, priority }))
-					)
-				}
-			}
-		}));
-	}
-
-	function updateConditional(index: number, patch: Partial<ConditionalVirtualTarget>) {
-		setModel(current => {
-			const targets = [...(current.routing.conditional?.targets ?? [])];
-			targets[index] = cleanEmpty({
-				...targets[index],
-				...patch
-			}) as ConditionalVirtualTarget;
-			return { ...current, routing: { conditional: { targets } } };
-		});
+	// A group's targets are contiguous, so a new one goes after the last target of
+	// every group up to and including `groupIndex`.
+	function addFailoverTarget(groupIndex: number) {
+		const position = getValues('failoverTargets').filter(
+			target => target.owner <= groupIndex
+		).length;
+		failover.insert(position, { owner: groupIndex, model: defaultTarget, priority: groupIndex });
+		renumberFailover();
 	}
 
 	return (
 		<Drawer
 			title={props.previousName ? 'Edit virtual model' : 'Add virtual model'}
 			onClose={props.onCancel}
-			dirty={JSON.stringify(model) !== initialDraft}
+			dirty={JSON.stringify(form) !== initialDraft}
 			saving={props.saving}
 			error={props.saveError}
 			raw={{
 				schemaPath: ['$defs', 'LocalLLMVirtualModel'],
 				value: () => preview ?? model,
 				onChange: value => {
-					setModel(value as LlmVirtualModel);
+					const next = value as LlmVirtualModel;
+					reset(virtualModelFormFrom(next));
 					merged.reset(value);
 				},
 				empty: makeEmptyVirtualModel(defaultTarget)
@@ -1445,11 +1528,7 @@ function VirtualModelEditor(props: {
 				path="name"
 				tooltip={props.help.field<LlmVirtualModel>('LocalLLMVirtualModel', 'name')}
 			>
-				<input
-					value={model.name}
-					onChange={event => setModel({ ...model, name: event.target.value })}
-					placeholder="resilient"
-				/>
+				<input {...register('model.name')} placeholder="resilient" />
 			</Field>
 
 			<FieldGroup
@@ -1487,69 +1566,22 @@ function VirtualModelEditor(props: {
 					tooltip={props.help.field<LocalLLMWeightedRouting>('LocalLLMWeightedRouting', 'targets')}
 				>
 					<div className="target-list">
-						{weightedTargets.map((target, index) => (
-							// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-							<div className="target-row weighted" key={index}>
-								<VirtualTargetSelector
-									label="Model"
-									targetModel={target.model}
-									baseModels={props.baseModels}
-									options={targetOptions}
-									providers={props.providers}
-									onChange={value => updateWeighted(index, { model: value })}
-								/>
-								<label className="target-field">
-									<span className="target-label">Weight</span>
-									<input
-										aria-label="Weight"
-										value={target.weight ?? 1}
-										onChange={event =>
-											updateWeighted(index, {
-												weight: Number(event.target.value) || 1
-											})
-										}
-										type="number"
-										min={1}
-									/>
-								</label>
-								<button
-									className="icon-button danger"
-									type="button"
-									aria-label="Remove target"
-									onClick={() =>
-										setModel(current => ({
-											...current,
-											routing: {
-												weighted: {
-													targets: (current.routing.weighted?.targets ?? []).filter(
-														(_, itemIndex) => itemIndex !== index
-													)
-												}
-											}
-										}))
-									}
-								>
-									<Trash2 size={16} />
-								</button>
-							</div>
+						{weighted.fields.map((field, index) => (
+							<WeightedTargetRow
+								key={field.id}
+								index={index}
+								control={control}
+								baseModels={props.baseModels}
+								options={targetOptions}
+								providers={props.providers}
+								onRemove={() => weighted.remove(index)}
+							/>
 						))}
 					</div>
 					<button
 						className="button"
 						type="button"
-						onClick={() =>
-							setModel(current => ({
-								...current,
-								routing: {
-									weighted: {
-										targets: [
-											...(current.routing.weighted?.targets ?? []),
-											{ model: defaultTarget, weight: 1 }
-										]
-									}
-								}
-							}))
-						}
+						onClick={() => weighted.append({ model: defaultTarget, weight: 1 })}
 					>
 						<Plus size={16} />
 						Add target
@@ -1561,106 +1593,25 @@ function VirtualModelEditor(props: {
 					tooltip={props.help.field<LocalLLMFailoverRouting>('LocalLLMFailoverRouting', 'targets')}
 				>
 					<div className="failover-group-list">
-						{failoverGroups.map((group, groupIndex) => (
-							// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-							<section className="match-card" key={groupIndex}>
-								<div className="match-card-header">
-									<strong>
-										{groupIndex === 0 ? 'First attempt' : `Fallback group ${groupIndex + 1}`}
-									</strong>
-									<Tooltip content="Remove group">
-										<button
-											className="icon-button danger"
-											type="button"
-											aria-label={`Remove failover group ${groupIndex + 1}`}
-											onClick={() =>
-												updateFailoverGroups(
-													failoverGroups.filter((_, itemIndex) => itemIndex !== groupIndex)
-												)
-											}
-										>
-											<Trash2 size={15} />
-										</button>
-									</Tooltip>
-								</div>
-								<div className="match-card-body">
-									<div className="target-list">
-										{group.map((target, targetIndex) => (
-											// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-											<div className="target-row failover" key={targetIndex}>
-												<VirtualTargetSelector
-													label="Model"
-													targetModel={target.model}
-													baseModels={props.baseModels}
-													options={targetOptions}
-													providers={props.providers}
-													onChange={value =>
-														updateFailoverGroups(
-															failoverGroups.map((item, itemIndex) =>
-																itemIndex === groupIndex
-																	? item.map((groupTarget, groupTargetIndex) =>
-																			groupTargetIndex === targetIndex
-																				? { ...groupTarget, model: value }
-																				: groupTarget
-																		)
-																	: item
-															)
-														)
-													}
-												/>
-												<button
-													className="icon-button danger"
-													type="button"
-													aria-label="Remove target"
-													onClick={() =>
-														updateFailoverGroups(
-															failoverGroups
-																.map((item, itemIndex) =>
-																	itemIndex === groupIndex
-																		? item.filter(
-																				(_, groupTargetIndex) => groupTargetIndex !== targetIndex
-																			)
-																		: item
-																)
-																.filter(item => item.length > 0)
-														)
-													}
-												>
-													<Trash2 size={16} />
-												</button>
-											</div>
-										))}
-									</div>
-									<button
-										className="button small"
-										type="button"
-										onClick={() =>
-											updateFailoverGroups(
-												failoverGroups.map((item, itemIndex) =>
-													itemIndex === groupIndex
-														? [...item, { model: defaultTarget, priority: groupIndex }]
-														: item
-												)
-											)
-										}
-									>
-										<Plus size={16} />
-										Add target
-									</button>
-								</div>
-							</section>
+						{failoverGroups.fields.map((field, groupIndex) => (
+							<FailoverGroupCard
+								key={field.id}
+								groupIndex={groupIndex}
+								rows={failover.fields.flatMap((target, position) =>
+									target.owner === groupIndex ? [{ id: target.id, position }] : []
+								)}
+								control={control}
+								baseModels={props.baseModels}
+								options={targetOptions}
+								providers={props.providers}
+								onAddTarget={() => addFailoverTarget(groupIndex)}
+								onRemoveTarget={removeFailoverTarget}
+								onRemoveGroup={() => removeFailoverGroup(groupIndex)}
+								onRenumber={renumberFailover}
+							/>
 						))}
 					</div>
-					<button
-						className="button"
-						type="button"
-						onClick={() =>
-							updateFailoverGroups([
-								...failoverGroups,
-								[{ model: defaultTarget, priority: failoverGroups.length }]
-							])
-						}
-					>
+					<button className="button" type="button" onClick={addFailoverGroup}>
 						<Plus size={16} />
 						Add fallback group
 					</button>
@@ -1674,70 +1625,19 @@ function VirtualModelEditor(props: {
 					)}
 				>
 					<div className="target-list">
-						{conditionalTargets.map((target, index) => {
-							const isFallback = !target.when?.trim();
-							return (
-								// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-								<div className="conditional-target-card" key={index}>
-									<div className="match-card-header">
-										<strong>{isFallback ? 'Fallback' : `Rule ${index + 1}`}</strong>
-										<Tooltip content="Remove rule">
-											<button
-												className="icon-button danger"
-												type="button"
-												aria-label="Remove conditional target"
-												onClick={() =>
-													setModel(current => ({
-														...current,
-														routing: {
-															conditional: {
-																targets: (current.routing.conditional?.targets ?? []).filter(
-																	(_, itemIndex) => itemIndex !== index
-																)
-															}
-														}
-													}))
-												}
-											>
-												<Trash2 size={15} />
-											</button>
-										</Tooltip>
-									</div>
-									<div className="conditional-target-body">
-										<FieldGroup
-											label="Condition"
-											tooltip={props.help.field<LocalLLMConditionalTarget>(
-												'LocalLLMConditionalTarget',
-												'when'
-											)}
-										>
-											<MiniMonacoEditor
-												language="cel"
-												value={target.when ?? ''}
-												onChange={value =>
-													updateConditional(index, {
-														when: value.trim() ? value : undefined
-													})
-												}
-												placeholder={
-													index === conditionalTargets.length - 1
-														? 'Blank final condition means fallback'
-														: 'json(request.body).route == "code"'
-												}
-											/>
-										</FieldGroup>
-										<VirtualTargetSelector
-											label="Target model"
-											targetModel={target.model}
-											baseModels={props.baseModels}
-											options={targetOptions}
-											providers={props.providers}
-											onChange={value => updateConditional(index, { model: value })}
-										/>
-									</div>
-								</div>
-							);
-						})}
+						{conditional.fields.map((field, index) => (
+							<ConditionalTargetCard
+								key={field.id}
+								index={index}
+								count={conditional.fields.length}
+								control={control}
+								help={props.help}
+								baseModels={props.baseModels}
+								options={targetOptions}
+								providers={props.providers}
+								onRemove={() => conditional.remove(index)}
+							/>
+						))}
 					</div>
 					{hasInvalidConditionalFallback ? (
 						<StatusBanner
@@ -1750,20 +1650,10 @@ function VirtualModelEditor(props: {
 							className="button"
 							type="button"
 							onClick={() =>
-								setModel(current => ({
-									...current,
-									routing: {
-										conditional: {
-											targets: [
-												...(current.routing.conditional?.targets ?? []),
-												{
-													when: 'json(request.body).route == "code"',
-													model: defaultTarget
-												}
-											]
-										}
-									}
-								}))
+								conditional.append({
+									when: 'json(request.body).route == "code"',
+									model: defaultTarget
+								})
 							}
 						>
 							<Plus size={16} />
@@ -1772,21 +1662,14 @@ function VirtualModelEditor(props: {
 						<button
 							className="button"
 							type="button"
-							onClick={() =>
-								setModel(current => ({
-									...current,
-									routing: {
-										conditional: {
-											targets: [
-												...(current.routing.conditional?.targets ?? []).filter(target =>
-													target.when?.trim()
-												),
-												{ model: defaultTarget }
-											]
-										}
-									}
-								}))
-							}
+							onClick={() => {
+								// Replaces the fallback, keeping the rules in order.
+								const fallbacks = getValues('conditionalTargets').flatMap((target, index) =>
+									target.when?.trim() ? [] : [index]
+								);
+								conditional.remove(fallbacks);
+								conditional.append({ model: defaultTarget });
+							}}
 						>
 							<Plus size={16} />
 							Add fallback
@@ -1795,6 +1678,204 @@ function VirtualModelEditor(props: {
 				</FieldGroup>
 			)}
 		</Drawer>
+	);
+}
+
+function WeightedTargetRow(props: {
+	index: number;
+	control: Control<VirtualModelForm>;
+	baseModels: LlmModel[];
+	options: VirtualTargetOptions;
+	providers: LlmProvider[];
+	onRemove: () => void;
+}) {
+	const { control, index } = props;
+	return (
+		<div className="target-row weighted">
+			<Controller
+				control={control}
+				name={`weightedTargets.${index}.model`}
+				render={({ field }) => (
+					<VirtualTargetSelector
+						label="Model"
+						targetModel={field.value}
+						baseModels={props.baseModels}
+						options={props.options}
+						providers={props.providers}
+						onChange={field.onChange}
+					/>
+				)}
+			/>
+			<WeightField control={control} name={`weightedTargets.${index}.weight`} />
+			<button
+				className="icon-button danger"
+				type="button"
+				aria-label="Remove target"
+				onClick={props.onRemove}
+			>
+				<Trash2 size={16} />
+			</button>
+		</div>
+	);
+}
+
+// A failover group is a row of `failoverGroups`. Its targets are the rows of
+// `failoverTargets` whose owner is its index.
+function FailoverGroupCard(props: {
+	groupIndex: number;
+	rows: Array<{ id: string; position: number }>;
+	control: Control<VirtualModelForm>;
+	baseModels: LlmModel[];
+	options: VirtualTargetOptions;
+	providers: LlmProvider[];
+	onAddTarget: () => void;
+	onRemoveTarget: (position: number) => void;
+	onRemoveGroup: () => void;
+	onRenumber: () => void;
+}) {
+	return (
+		<section className="match-card">
+			<div className="match-card-header">
+				<strong>
+					{props.groupIndex === 0 ? 'First attempt' : `Fallback group ${props.groupIndex + 1}`}
+				</strong>
+				<Tooltip content="Remove group">
+					<button
+						className="icon-button danger"
+						type="button"
+						aria-label={`Remove failover group ${props.groupIndex + 1}`}
+						onClick={props.onRemoveGroup}
+					>
+						<Trash2 size={15} />
+					</button>
+				</Tooltip>
+			</div>
+			<div className="match-card-body">
+				<div className="target-list">
+					{props.rows.map(row => (
+						<div className="target-row failover" key={row.id}>
+							<Controller
+								control={props.control}
+								name={`failoverTargets.${row.position}.model`}
+								render={({ field }) => (
+									<VirtualTargetSelector
+										label="Model"
+										targetModel={field.value}
+										baseModels={props.baseModels}
+										options={props.options}
+										providers={props.providers}
+										onChange={value => {
+											field.onChange(value);
+											props.onRenumber();
+										}}
+									/>
+								)}
+							/>
+							<button
+								className="icon-button danger"
+								type="button"
+								aria-label="Remove target"
+								onClick={() => props.onRemoveTarget(row.position)}
+							>
+								<Trash2 size={16} />
+							</button>
+						</div>
+					))}
+				</div>
+				<button className="button small" type="button" onClick={props.onAddTarget}>
+					<Plus size={16} />
+					Add target
+				</button>
+			</div>
+		</section>
+	);
+}
+
+function ConditionalTargetCard(props: {
+	index: number;
+	count: number;
+	control: Control<VirtualModelForm>;
+	help: SchemaHelp;
+	baseModels: LlmModel[];
+	options: VirtualTargetOptions;
+	providers: LlmProvider[];
+	onRemove: () => void;
+}) {
+	const { control, index } = props;
+	const when = useWatch({ control, name: `conditionalTargets.${index}.when` });
+	const isFallback = !when?.trim();
+	return (
+		<div className="conditional-target-card">
+			<div className="match-card-header">
+				<strong>{isFallback ? 'Fallback' : `Rule ${index + 1}`}</strong>
+				<Tooltip content="Remove rule">
+					<button
+						className="icon-button danger"
+						type="button"
+						aria-label="Remove conditional target"
+						onClick={props.onRemove}
+					>
+						<Trash2 size={15} />
+					</button>
+				</Tooltip>
+			</div>
+			<div className="conditional-target-body">
+				<FieldGroup
+					label="Condition"
+					tooltip={props.help.field<LocalLLMConditionalTarget>('LocalLLMConditionalTarget', 'when')}
+				>
+					<Controller
+						control={control}
+						name={`conditionalTargets.${index}.when`}
+						render={({ field }) => (
+							<MiniMonacoEditor
+								language="cel"
+								value={field.value ?? ''}
+								onChange={value => field.onChange(value.trim() ? value : undefined)}
+								placeholder={
+									index === props.count - 1
+										? 'Blank final condition means fallback'
+										: 'json(request.body).route == "code"'
+								}
+							/>
+						)}
+					/>
+				</FieldGroup>
+				<Controller
+					control={control}
+					name={`conditionalTargets.${index}.model`}
+					render={({ field }) => (
+						<VirtualTargetSelector
+							label="Target model"
+							targetModel={field.value}
+							baseModels={props.baseModels}
+							options={props.options}
+							providers={props.providers}
+							onChange={field.onChange}
+						/>
+					)}
+				/>
+			</div>
+		</div>
+	);
+}
+
+function WeightField(props: {
+	control: Control<VirtualModelForm>;
+	name: `weightedTargets.${number}.weight`;
+}) {
+	const { field } = useController({ control: props.control, name: props.name });
+	return (
+		<label className="target-field">
+			<span className="target-label">Weight</span>
+			<input
+				aria-label="Weight"
+				value={field.value ?? 1}
+				onChange={event => field.onChange(Number(event.target.value) || 1)}
+				type="number"
+				min={1}
+			/>
+		</label>
 	);
 }
 

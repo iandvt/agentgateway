@@ -1,5 +1,6 @@
 import { Plus, Server, Trash2 } from 'lucide-react';
 import { useState } from 'react';
+import { Controller, useFieldArray, useForm } from 'react-hook-form';
 
 import { LostFieldsWarning, UnsupportedInForm, useMergedEdits } from '@/components/EditorContracts';
 import { EnumSelector } from '@/components/EnumSelector';
@@ -18,6 +19,9 @@ type ProcessorDraft = {
 	failureMode: FailureMode;
 	methods: Record<string, Phase>;
 	metadata: Record<string, string>;
+};
+type McpGuardrailsFormValues = {
+	processors: ProcessorDraft[];
 };
 
 const phaseOptions = [
@@ -40,7 +44,11 @@ export function McpGuardrailsPolicyEditor(props: {
 	onSave: (guardrails: McpGuardrailsDraft) => void;
 }) {
 	const [initial] = useState(() => initialProcessors(props.guardrails));
-	const [processors, setProcessors] = useState<ProcessorDraft[]>(initial ?? []);
+	const { control, register, watch } = useForm<McpGuardrailsFormValues>({
+		defaultValues: { processors: initial ?? [] }
+	});
+	const { append, fields, remove } = useFieldArray({ control, name: 'processors' });
+	const { processors } = watch();
 	const [errors, setErrors] = useState<Record<number, string>>({});
 	const [error, setError] = useState<string | null>(null);
 	const preview = buildGuardrails(processors);
@@ -51,16 +59,11 @@ export function McpGuardrailsPolicyEditor(props: {
 	}
 
 	function addProcessor() {
-		setProcessors(current => [...current, newProcessor()]);
+		append(newProcessor(), { shouldFocus: false });
 		setError(null);
 	}
 
-	function updateProcessor(index: number, patch: Partial<ProcessorDraft>) {
-		setProcessors(current =>
-			current.map((processor, processorIndex) =>
-				processorIndex === index ? { ...processor, ...patch } : processor
-			)
-		);
+	function clearProcessorError(index: number) {
 		setErrors(current => {
 			if (!current[index]) return current;
 			const next = { ...current };
@@ -71,7 +74,7 @@ export function McpGuardrailsPolicyEditor(props: {
 	}
 
 	function removeProcessor(index: number) {
-		setProcessors(current => current.filter((_, processorIndex) => processorIndex !== index));
+		remove(index);
 		setErrors({});
 		setError(null);
 	}
@@ -129,78 +132,105 @@ export function McpGuardrailsPolicyEditor(props: {
 				/>
 			) : (
 				<div className="mcp-processor-list">
-					{processors.map((processor, index) => (
-						<section
-							className={errors[index] ? 'mcp-processor-card invalid' : 'mcp-processor-card'}
-							// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-							key={index}
-						>
-							<div className="mcp-processor-header">
-								<span className="policy-form-section-icon compact">
-									<Server size={16} />
-								</span>
-								<div className="mcp-processor-title">
-									<strong>Processor {index + 1}</strong>
-									<code>{processor.host || 'No host configured'}</code>
+					{fields.map((field, index) => {
+						const processor = processors[index];
+						return (
+							<section
+								className={errors[index] ? 'mcp-processor-card invalid' : 'mcp-processor-card'}
+								key={field.id}
+							>
+								<div className="mcp-processor-header">
+									<span className="policy-form-section-icon compact">
+										<Server size={16} />
+									</span>
+									<div className="mcp-processor-title">
+										<strong>Processor {index + 1}</strong>
+										<code>{processor.host || 'No host configured'}</code>
+									</div>
+									<span className={processor.failureMode === 'failOpen' ? 'badge warn' : 'badge'}>
+										{processor.failureMode === 'failOpen' ? 'Fail open' : 'Fail closed'}
+									</span>
+									<button
+										className="table-action danger"
+										type="button"
+										onClick={() => removeProcessor(index)}
+									>
+										<Trash2 size={14} />
+										Delete
+									</button>
 								</div>
-								<span className={processor.failureMode === 'failOpen' ? 'badge warn' : 'badge'}>
-									{processor.failureMode === 'failOpen' ? 'Fail open' : 'Fail closed'}
-								</span>
-								<button
-									className="table-action danger"
-									type="button"
-									onClick={() => removeProcessor(index)}
-								>
-									<Trash2 size={14} />
-									Delete
-								</button>
-							</div>
 
-							<div className="mcp-processor-controls">
-								<Field label="Host" tooltip={props.help.field<Processor>('Processor', 'host')}>
-									<input
-										value={processor.host}
-										onChange={event => updateProcessor(index, { host: event.target.value })}
-										placeholder="guardrails.example.com:9000"
-									/>
-								</Field>
-								<FieldGroup
-									label="Failure mode"
-									tooltip={props.help.field<Processor>('Processor', 'failureMode')}
-								>
-									<EnumSelector
-										ariaLabel={`Processor ${index + 1} failure mode`}
-										value={processor.failureMode}
-										options={failureOptions}
-										schema={props.help.fieldNode<Processor>('Processor', 'failureMode')}
-										onChange={value =>
-											updateProcessor(index, {
-												failureMode: value as FailureMode
-											})
-										}
-									/>
-								</FieldGroup>
-							</div>
+								<div className="mcp-processor-controls">
+									<Field label="Host" tooltip={props.help.field<Processor>('Processor', 'host')}>
+										<input
+											{...register(`processors.${index}.host`, {
+												onChange: () => clearProcessorError(index)
+											})}
+											placeholder="guardrails.example.com:9000"
+										/>
+									</Field>
+									<FieldGroup
+										label="Failure mode"
+										tooltip={props.help.field<Processor>('Processor', 'failureMode')}
+									>
+										<Controller
+											control={control}
+											name={`processors.${index}.failureMode`}
+											render={({ field: failureField }) => (
+												<EnumSelector
+													ariaLabel={`Processor ${index + 1} failure mode`}
+													value={failureField.value}
+													options={failureOptions}
+													schema={props.help.fieldNode<Processor>('Processor', 'failureMode')}
+													onChange={value => {
+														failureField.onChange(value as FailureMode);
+														clearProcessorError(index);
+													}}
+												/>
+											)}
+										/>
+									</FieldGroup>
+								</div>
 
-							<MethodPhaseEditor
-								methods={processor.methods}
-								help={props.help}
-								onChange={methods => updateProcessor(index, { methods })}
-							/>
+								{/* RHF treats a plain object with a target key as a DOM event, so object values are wrapped. */}
+								<Controller
+									control={control}
+									name={`processors.${index}.methods`}
+									render={({ field: methodsField }) => (
+										<MethodPhaseEditor
+											methods={methodsField.value}
+											help={props.help}
+											onChange={methods => {
+												methodsField.onChange({ target: { value: methods } });
+												clearProcessorError(index);
+											}}
+										/>
+									)}
+								/>
 
-							<KeyValueEditor
-								label="Metadata"
-								tooltip={props.help.field<Processor>('Processor', 'metadata')}
-								values={processor.metadata}
-								keyPlaceholder="metadata key"
-								valuePlaceholder="CEL expression"
-								valueKind="cel"
-								onChange={metadata => updateProcessor(index, { metadata })}
-							/>
+								<Controller
+									control={control}
+									name={`processors.${index}.metadata`}
+									render={({ field: metadataField }) => (
+										<KeyValueEditor
+											label="Metadata"
+											tooltip={props.help.field<Processor>('Processor', 'metadata')}
+											values={metadataField.value}
+											keyPlaceholder="metadata key"
+											valuePlaceholder="CEL expression"
+											valueKind="cel"
+											onChange={metadata => {
+												metadataField.onChange({ target: { value: metadata } });
+												clearProcessorError(index);
+											}}
+										/>
+									)}
+								/>
 
-							{errors[index] ? <small className="field-error">{errors[index]}</small> : null}
-						</section>
-					))}
+								{errors[index] ? <small className="field-error">{errors[index]}</small> : null}
+							</section>
+						);
+					})}
 				</div>
 			)}
 
@@ -289,8 +319,7 @@ function initialProcessors(
 					host: processor.host,
 					failureMode: processor.failureMode === 'failOpen' ? 'failOpen' : 'failClosed',
 					methods: phaseMap(processor.methods),
-					metadata: stringMap(processor.metadata),
-					requestHeaders: ''
+					metadata: stringMap(processor.metadata)
 				}
 			: undefined
 	);

@@ -1,6 +1,7 @@
 import { Link } from '@tanstack/react-router';
 import { Network, Pencil, Plus, Route as RouteIcon, Trash2 } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { type ReactNode, useLayoutEffect, useMemo, useState } from 'react';
+import { useFieldArray, useForm } from 'react-hook-form';
 
 import { ConfigDiffSaveActions } from '@/components/ConfigDiffDrawer';
 import { LostFieldsWarning, useMergedEdits } from '@/components/EditorContracts';
@@ -188,10 +189,7 @@ function TrafficListenersEditorPage() {
 							return (
 								<section
 									className="traffic-bind"
-									key={`${bind.port}-${
-										// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-										bindIndex
-									}`}
+									key={`${bind.mode ?? 'standard'}:${bind.port ?? 'none'}`}
 								>
 									<div className="traffic-bind-header">
 										<div>
@@ -257,70 +255,69 @@ function TrafficListenersEditorPage() {
 													</tr>
 												</thead>
 												<tbody>
-													{bind.listeners.map((listener, listenerIndex) => (
-														<tr
-															key={`${listener.name}-${
-																// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-																listenerIndex
-															}`}
-														>
-															<td className="strong">
-																{listenerDisplayName(listener, listenerIndex)}
-															</td>
-															<td>{listener.hostname || '*'}</td>
-															<td>
-																<span className="badge">{listener.protocol ?? 'HTTP'}</span>
-															</td>
-															<td>
-																{(listener.routes?.length ?? 0) + (listener.tcpRoutes?.length ?? 0)}
-															</td>
-															<td>{listenerBackendCount(listener)}</td>
-															<td className="row-actions">
-																<Tooltip content="Add route">
-																	<Link
-																		className="icon-button"
-																		aria-label="Add route"
-																		to="/traffic/routes"
-																		search={{
-																			listener: `${bindIndex}:${listenerIndex}`
-																		}}
-																	>
-																		<RouteIcon size={16} />
-																	</Link>
-																</Tooltip>
-																<Tooltip content="Edit listener">
-																	<button
-																		className="icon-button"
-																		type="button"
-																		aria-label="Edit listener"
-																		onClick={() =>
-																			openListenerEditor(bindIndex, listener, listenerIndex)
-																		}
-																	>
-																		<Pencil size={16} />
-																	</button>
-																</Tooltip>
-																<Tooltip content="Delete listener">
-																	<button
-																		className="icon-button danger"
-																		type="button"
-																		aria-label="Delete listener"
-																		disabled={update.isPending}
-																		onClick={() =>
-																			setDeleting({
-																				kind: 'listener',
-																				bindIndex,
-																				listenerIndex,
-																				label: listenerDisplayName(listener, listenerIndex)
-																			})
-																		}
-																	>
-																		<Trash2 size={16} />
-																	</button>
-																</Tooltip>
-															</td>
-														</tr>
-													))}
+													<ListenerRows
+														listeners={bind.listeners}
+														renderRow={(listener, listenerIndex, rowKey) => (
+															<tr key={rowKey}>
+																<td className="strong">
+																	{listenerDisplayName(listener, listenerIndex)}
+																</td>
+																<td>{listener.hostname || '*'}</td>
+																<td>
+																	<span className="badge">{listener.protocol ?? 'HTTP'}</span>
+																</td>
+																<td>
+																	{(listener.routes?.length ?? 0) +
+																		(listener.tcpRoutes?.length ?? 0)}
+																</td>
+																<td>{listenerBackendCount(listener)}</td>
+																<td className="row-actions">
+																	<Tooltip content="Add route">
+																		<Link
+																			className="icon-button"
+																			aria-label="Add route"
+																			to="/traffic/routes"
+																			search={{
+																				listener: `${bindIndex}:${listenerIndex}`
+																			}}
+																		>
+																			<RouteIcon size={16} />
+																		</Link>
+																	</Tooltip>
+																	<Tooltip content="Edit listener">
+																		<button
+																			className="icon-button"
+																			type="button"
+																			aria-label="Edit listener"
+																			onClick={() =>
+																				openListenerEditor(bindIndex, listener, listenerIndex)
+																			}
+																		>
+																			<Pencil size={16} />
+																		</button>
+																	</Tooltip>
+																	<Tooltip content="Delete listener">
+																		<button
+																			className="icon-button danger"
+																			type="button"
+																			aria-label="Delete listener"
+																			disabled={update.isPending}
+																			onClick={() =>
+																				setDeleting({
+																					kind: 'listener',
+																					bindIndex,
+																					listenerIndex,
+																					label: listenerDisplayName(listener, listenerIndex)
+																				})
+																			}
+																		>
+																			<Trash2 size={16} />
+																		</button>
+																	</Tooltip>
+																</td>
+															</tr>
+														)}
+													/>
 												</tbody>
 											</table>
 										</div>
@@ -416,6 +413,68 @@ function TrafficListenersEditorPage() {
 				</ConfirmDialog>
 			) : null}
 		</div>
+	);
+}
+
+// A row's identity is its listener name plus its occurrence among equal names, so
+// duplicate names stay distinct. A mount-local form holds only these identities,
+// and each row is keyed by its field id. Rows render their content from the query
+// data, so a row always shows the current listener.
+function listenerRowIdentities(listeners: Array<{ name?: string | null }>) {
+	const occurrences = new Map<string, number>();
+	return listeners.map(listener => {
+		const name = JSON.stringify(listener.name ?? null);
+		const occurrence = occurrences.get(name) ?? 0;
+		occurrences.set(name, occurrence + 1);
+		return `${name}#${occurrence}`;
+	});
+}
+
+function ListenerRows<T extends { name?: string | null }>(props: {
+	listeners: T[];
+	renderRow: (listener: T, index: number, key: string) => ReactNode;
+}) {
+	const identities = listenerRowIdentities(props.listeners);
+	const identityKey = JSON.stringify(identities);
+	const { control, getValues } = useForm({
+		defaultValues: { rows: identities.map(identity => ({ identity })) }
+	});
+	const { fields, insert, remove } = useFieldArray({ control, name: 'rows' });
+
+	// Runs before paint. Removes rows whose identity is gone, then inserts missing
+	// rows at their position. Rows that stay keep their field ids.
+	useLayoutEffect(() => {
+		const wanted: string[] = JSON.parse(identityKey);
+		const current = getValues('rows').map(row => row.identity);
+		const wantedSet = new Set(wanted);
+		for (let index = current.length - 1; index >= 0; index--) {
+			if (!wantedSet.has(current[index])) {
+				remove(index);
+				current.splice(index, 1);
+			}
+		}
+		wanted.forEach((identity, index) => {
+			if (current[index] === identity) return;
+			const existing = current.indexOf(identity);
+			if (existing >= 0) {
+				remove(existing);
+				current.splice(existing, 1);
+			}
+			insert(index, { identity }, { shouldFocus: false });
+			current.splice(index, 0, identity);
+		});
+	}, [identityKey, getValues, insert, remove]);
+
+	const positions = new Map(identities.map((identity, index) => [identity, index]));
+	return (
+		<>
+			{fields.flatMap(field => {
+				const index = positions.get(field.identity);
+				return index === undefined
+					? []
+					: [props.renderRow(props.listeners[index], index, field.id)];
+			})}
+		</>
 	);
 }
 

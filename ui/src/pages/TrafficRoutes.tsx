@@ -1,6 +1,14 @@
 import { Link, useLocation } from '@tanstack/react-router';
 import { Pencil, Plus, Route as RouteIcon, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
+import {
+	type Control,
+	Controller,
+	useController,
+	useFieldArray,
+	useForm,
+	useWatch
+} from 'react-hook-form';
 
 import { ConfigDiffSaveActions } from '@/components/ConfigDiffDrawer';
 import { LostFieldsWarning, UnsupportedInForm, useMergedEdits } from '@/components/EditorContracts';
@@ -55,8 +63,6 @@ import type {
 
 const pathTypes = ['pathPrefix', 'exact', 'regex'] as const;
 type HttpMatch = NonNullable<TrafficRoute['matches']>[number];
-type HeaderMatch = NonNullable<HttpMatch['headers']>[number];
-type QueryMatch = NonNullable<HttpMatch['query']>[number];
 type LocalAttachedGatewayRoute = LocalAttachedRoute | LocalAttachedTCPRoute;
 type GatewayRouteRow = {
 	kind: RouteKind;
@@ -658,6 +664,17 @@ function GatewayRoutesEditorPage() {
 	);
 }
 
+// Values of a route drawer. Each drawer sets the keys it shows: `gateway` for
+// gateway routes and `listenerKey` for listener routes. RHF reads object
+// arguments with a `target` key as DOM events, so object values go through
+// `field.onChange({ target: { value } })`.
+type RouteFormValues = {
+	kind: RouteKind;
+	gateway: string;
+	listenerKey: string;
+	route: LocalAttachedGatewayRoute | TrafficRoute | TrafficTcpRoute;
+};
+
 function GatewayRouteEditor(props: {
 	config?: GatewayConfig;
 	editing: {
@@ -677,12 +694,17 @@ function GatewayRouteEditor(props: {
 		route: LocalAttachedGatewayRoute;
 	}) => void;
 }) {
-	const [kind, setKind] = useState<RouteKind>(props.editing.kind);
-	const [route, setRoute] = useState<LocalAttachedGatewayRoute>(props.editing.route);
+	const { control, getValues, register, reset } = useForm<RouteFormValues>({
+		defaultValues: {
+			kind: props.editing.kind,
+			gateway: effectiveGatewayRouteRef(props.editing.route, props.config, props.editing.kind),
+			listenerKey: '',
+			route: props.editing.route
+		}
+	});
+	const [gateway, kind, formRoute] = useWatch({ control, name: ['gateway', 'kind', 'route'] });
+	const route = formRoute as LocalAttachedGatewayRoute;
 	const gatewayOptions = gatewayReferenceOptions(props.config, kind);
-	const [gateway, setGateway] = useState(
-		effectiveGatewayRouteRef(props.editing.route, props.config, kind)
-	);
 	const multipleGateways = Array.isArray(route.gateways) && route.gateways.length > 1;
 	const preview = cleanGatewayRoute(
 		{
@@ -725,9 +747,12 @@ function GatewayRouteEditor(props: {
 				value: () => merged.value,
 				onChange: value => {
 					const next = value as LocalAttachedGatewayRoute;
-					setRoute(next);
+					reset({
+						...getValues(),
+						gateway: effectiveGatewayRouteRef(next, props.config, kind),
+						route: next
+					});
 					merged.reset(next);
-					setGateway(effectiveGatewayRouteRef(next, props.config, kind));
 				},
 				empty: makeRoute(kind)
 			}}
@@ -772,21 +797,30 @@ function GatewayRouteEditor(props: {
 			<div className="route-editor-stack">
 				{!props.editing.resourceId && typeof props.editing.routeIndex !== 'number' ? (
 					<FieldGroup label="Kind" tooltip="Route protocol family.">
-						<EnumSelector
-							ariaLabel="Route kind"
-							value={kind}
-							options={[
-								{ value: 'http', label: 'HTTP' },
-								{ value: 'tcp', label: 'TCP' }
-							]}
-							onChange={value => {
-								const nextKind = value as RouteKind;
-								const nextOptions = gatewayReferenceOptions(props.config, nextKind);
-								setKind(nextKind);
-								setGateway(nextOptions[0]?.value ?? '');
-								setRoute(makeRoute(nextKind) as LocalAttachedGatewayRoute);
-								merged.reset(undefined);
-							}}
+						<Controller
+							control={control}
+							name="kind"
+							render={({ field }) => (
+								<EnumSelector
+									ariaLabel="Route kind"
+									value={field.value}
+									options={[
+										{ value: 'http', label: 'HTTP' },
+										{ value: 'tcp', label: 'TCP' }
+									]}
+									onChange={value => {
+										const nextKind = value as RouteKind;
+										const nextOptions = gatewayReferenceOptions(props.config, nextKind);
+										reset({
+											...getValues(),
+											kind: nextKind,
+											gateway: nextOptions[0]?.value ?? '',
+											route: makeRoute(nextKind)
+										});
+										merged.reset(undefined);
+									}}
+								/>
+							)}
 						/>
 					</FieldGroup>
 				) : null}
@@ -796,11 +830,17 @@ function GatewayRouteEditor(props: {
 					missing={!gateway}
 					tooltip="Gateway or gateway listener that owns this route."
 				>
-					<Dropdown
-						ariaLabel="Gateway"
-						value={gateway}
-						options={gatewayOptions}
-						onChange={setGateway}
+					<Controller
+						control={control}
+						name="gateway"
+						render={({ field }) => (
+							<Dropdown
+								ariaLabel="Gateway"
+								value={field.value}
+								options={gatewayOptions}
+								onChange={field.onChange}
+							/>
+						)}
 					/>
 				</FieldGroup>
 
@@ -815,11 +855,7 @@ function GatewayRouteEditor(props: {
 								: props.help.field<TrafficTcpRoute>('LocalTCPRoute', 'name')
 						}
 					>
-						<input
-							value={route.name ?? ''}
-							onChange={event => setRoute({ ...route, name: event.target.value })}
-							placeholder="api"
-						/>
+						<input {...register('route.name')} placeholder="api" />
 					</Field>
 					<Field
 						label="Hostnames"
@@ -838,34 +874,47 @@ function GatewayRouteEditor(props: {
 									)
 						}
 					>
-						<input
-							value={(route.hostnames ?? []).join(', ')}
-							onChange={event => setRoute({ ...route, hostnames: splitList(event.target.value) })}
-							placeholder="example.com, *.example.com"
-						/>
+						{(id, hintId, invalid) => (
+							<Controller
+								control={control}
+								name="route.hostnames"
+								render={({ field }) => (
+									<input
+										id={id}
+										aria-describedby={hintId}
+										aria-invalid={invalid || undefined}
+										value={(field.value ?? []).join(', ')}
+										onChange={event => field.onChange(splitList(event.target.value))}
+										placeholder="example.com, *.example.com"
+									/>
+								)}
+							/>
+						)}
 					</Field>
 				</div>
 
 				{kind === 'http' ? (
-					<HttpMatchEditor
-						route={route as TrafficRoute}
-						help={props.help}
-						onChange={nextRoute => setRoute({ ...route, ...nextRoute })}
-					/>
+					<HttpMatchEditor control={control} route={route as TrafficRoute} help={props.help} />
 				) : null}
 
 				<RouteBackendsEditor
+					control={control}
 					kind={kind}
 					help={props.help}
-					backends={(route.backends ?? []) as Array<TrafficRouteBackend | TrafficTcpRouteBackend>}
-					onChange={backends => setRoute({ ...route, backends: backends as never })}
+					backends={(route.backends ?? []) as TrafficBackend[]}
 				/>
 
-				<TrafficPolicySection
-					title="Route policies"
-					schemaRoot={kind === 'http' ? 'FilterOrPolicy' : 'TCPFilterOrPolicy'}
-					policies={route.policies as Record<string, unknown> | null | undefined}
-					onChange={policies => setRoute({ ...route, policies })}
+				<Controller
+					control={control}
+					name="route.policies"
+					render={({ field }) => (
+						<TrafficPolicySection
+							title="Route policies"
+							schemaRoot={kind === 'http' ? 'FilterOrPolicy' : 'TCPFilterOrPolicy'}
+							policies={field.value as Record<string, unknown> | null | undefined}
+							onChange={policies => field.onChange({ target: { value: policies } })}
+						/>
+					)}
 				/>
 			</div>
 		</Drawer>
@@ -898,12 +947,16 @@ function RouteEditor(props: {
 		route: TrafficRoute | TrafficTcpRoute;
 	}) => void;
 }) {
-	const [listenerKey, setListenerKey] = useState(
-		`${props.editing.bindIndex}:${props.editing.listenerIndex}`
-	);
-	const [kind, setKind] = useState<RouteKind>(props.editing.kind);
-	const [route, setRoute] = useState<TrafficRoute | TrafficTcpRoute>(props.editing.route);
-	const draft = JSON.stringify({ listenerKey, kind, route });
+	const { control, getValues, register, reset } = useForm<RouteFormValues>({
+		defaultValues: {
+			kind: props.editing.kind,
+			gateway: '',
+			listenerKey: `${props.editing.bindIndex}:${props.editing.listenerIndex}`,
+			route: props.editing.route
+		}
+	});
+	const [kind, listenerKey, route] = useWatch({ control, name: ['kind', 'listenerKey', 'route'] });
+	const draft = JSON.stringify([kind, listenerKey, route]);
 	const [initialDraft] = useState(() => draft);
 	const selectedListener = props.listeners.find(
 		item => `${item.bindIndex}:${item.listenerIndex}` === listenerKey
@@ -911,7 +964,7 @@ function RouteEditor(props: {
 	const effectiveKind = selectedListener ? listenerRouteKind(selectedListener.listener) : kind;
 	const merged = useMergedEdits(
 		typeof props.editing.routeIndex === 'number' ? props.editing.route : undefined,
-		cleanRoute(route, effectiveKind),
+		cleanRoute(route as TrafficRoute | TrafficTcpRoute, effectiveKind),
 		['$defs', effectiveKind === 'http' ? 'LocalRoute' : 'LocalTCPRoute']
 	);
 
@@ -935,7 +988,7 @@ function RouteEditor(props: {
 				schemaPath: ['$defs', effectiveKind === 'http' ? 'LocalRoute' : 'LocalTCPRoute'],
 				value: () => merged.value,
 				onChange: value => {
-					setRoute(value as TrafficRoute | TrafficTcpRoute);
+					reset({ ...getValues(), route: value as TrafficRoute | TrafficTcpRoute });
 					merged.reset(value);
 				},
 				empty: makeRoute(effectiveKind)
@@ -972,23 +1025,32 @@ function RouteEditor(props: {
 						tooltip="Listener that owns this route."
 						missing={!selectedListener}
 					>
-						<Dropdown
-							ariaLabel="Listener"
-							value={listenerKey}
-							options={props.listeners.map(item => ({
-								value: `${item.bindIndex}:${item.listenerIndex}`,
-								label: `:${item.bind.port ?? '*'} · ${listenerDisplayName(item.listener, item.listenerIndex)} · ${listenerRouteKind(item.listener).toUpperCase()}`
-							}))}
-							onChange={value => {
-								setListenerKey(value);
-								const nextListener = props.listeners.find(
-									item => `${item.bindIndex}:${item.listenerIndex}` === value
-								);
-								const nextKind = nextListener ? listenerRouteKind(nextListener.listener) : kind;
-								setKind(nextKind);
-								setRoute(makeRoute(nextKind));
-								merged.reset(undefined);
-							}}
+						<Controller
+							control={control}
+							name="listenerKey"
+							render={({ field }) => (
+								<Dropdown
+									ariaLabel="Listener"
+									value={field.value}
+									options={props.listeners.map(item => ({
+										value: `${item.bindIndex}:${item.listenerIndex}`,
+										label: `:${item.bind.port ?? '*'} · ${listenerDisplayName(item.listener, item.listenerIndex)} · ${listenerRouteKind(item.listener).toUpperCase()}`
+									}))}
+									onChange={value => {
+										const nextListener = props.listeners.find(
+											item => `${item.bindIndex}:${item.listenerIndex}` === value
+										);
+										const nextKind = nextListener ? listenerRouteKind(nextListener.listener) : kind;
+										reset({
+											...getValues(),
+											listenerKey: value,
+											kind: nextKind,
+											route: makeRoute(nextKind)
+										});
+										merged.reset(undefined);
+									}}
+								/>
+							)}
 						/>
 					</FieldGroup>
 				) : null}
@@ -1003,11 +1065,7 @@ function RouteEditor(props: {
 								: props.help.field<TrafficTcpRoute>('LocalTCPRoute', 'name')
 						}
 					>
-						<input
-							value={route.name ?? ''}
-							onChange={event => setRoute({ ...route, name: event.target.value })}
-							placeholder="api"
-						/>
+						<input {...register('route.name')} placeholder="api" />
 					</Field>
 					<Field
 						label="Hostnames"
@@ -1018,30 +1076,47 @@ function RouteEditor(props: {
 							'Comma-separated hostnames. Wildcards are allowed.'
 						)}
 					>
-						<input
-							value={(route.hostnames ?? []).join(', ')}
-							onChange={event => setRoute({ ...route, hostnames: splitList(event.target.value) })}
-							placeholder="example.com, *.example.com"
-						/>
+						{(id, hintId, invalid) => (
+							<Controller
+								control={control}
+								name="route.hostnames"
+								render={({ field }) => (
+									<input
+										id={id}
+										aria-describedby={hintId}
+										aria-invalid={invalid || undefined}
+										value={(field.value ?? []).join(', ')}
+										onChange={event => field.onChange(splitList(event.target.value))}
+										placeholder="example.com, *.example.com"
+									/>
+								)}
+							/>
+						)}
 					</Field>
 				</div>
 
 				{effectiveKind === 'http' ? (
-					<HttpMatchEditor route={route as TrafficRoute} help={props.help} onChange={setRoute} />
+					<HttpMatchEditor control={control} route={route as TrafficRoute} help={props.help} />
 				) : null}
 
 				<RouteBackendsEditor
+					control={control}
 					kind={effectiveKind}
 					help={props.help}
-					backends={(route.backends ?? []) as Array<TrafficRouteBackend | TrafficTcpRouteBackend>}
-					onChange={backends => setRoute({ ...route, backends: backends as never })}
+					backends={(route.backends ?? []) as TrafficBackend[]}
 				/>
 
-				<TrafficPolicySection
-					title="Route policies"
-					schemaRoot={effectiveKind === 'http' ? 'FilterOrPolicy' : 'TCPFilterOrPolicy'}
-					policies={route.policies as Record<string, unknown> | null | undefined}
-					onChange={policies => setRoute({ ...route, policies })}
+				<Controller
+					control={control}
+					name="route.policies"
+					render={({ field }) => (
+						<TrafficPolicySection
+							title="Route policies"
+							schemaRoot={effectiveKind === 'http' ? 'FilterOrPolicy' : 'TCPFilterOrPolicy'}
+							policies={field.value as Record<string, unknown> | null | undefined}
+							onChange={policies => field.onChange({ target: { value: policies } })}
+						/>
+					)}
 				/>
 			</div>
 		</Drawer>
@@ -1049,18 +1124,21 @@ function RouteEditor(props: {
 }
 
 function HttpMatchEditor(props: {
+	control: Control<RouteFormValues>;
 	route: TrafficRoute;
 	help: SchemaHelp;
-	onChange: (route: TrafficRoute) => void;
 }) {
 	const first = props.route.matches?.[0] ?? { path: { pathPrefix: '/' } };
 	const path = first.path && first.path !== 'invalid' ? first.path : { pathPrefix: '/' };
 	const pathType = 'regex' in path ? 'regex' : 'exact' in path ? 'exact' : 'pathPrefix';
 	const pathValue = 'regex' in path ? path.regex : 'exact' in path ? path.exact : path.pathPrefix;
 
-	function updateFirst(next: typeof first) {
-		const rest = props.route.matches?.slice(1) ?? [];
-		props.onChange({ ...props.route, matches: [next, ...rest] });
+	const matchesField = useController({ control: props.control, name: 'route.matches' }).field;
+
+	// Edits write the first match by name. When no match is stored, the default
+	// match is stored first, so a write keeps the default path.
+	function ensureFirst() {
+		if (!props.route.matches?.length) matchesField.onChange([first]);
 	}
 
 	return (
@@ -1071,20 +1149,26 @@ function HttpMatchEditor(props: {
 					path="matches.0.path"
 					tooltip={props.help.field<GeneratedRouteMatch>('RouteMatch', 'path')}
 				>
-					<EnumSelector
-						ariaLabel="Path match"
-						value={pathType}
-						options={pathTypes.map(value => ({
-							value,
-							label: pathLabel(value)
-						}))}
-						schema={props.help.node(['$defs', 'RouteMatch', 'properties', 'path'])}
-						onChange={value =>
-							updateFirst({
-								...first,
-								path: { [value]: pathValue || '/' }
-							} as typeof first)
-						}
+					<Controller
+						control={props.control}
+						name="route.matches.0.path"
+						render={({ field }) => (
+							<EnumSelector
+								ariaLabel="Path match"
+								value={pathType}
+								options={pathTypes.map(value => ({
+									value,
+									label: pathLabel(value)
+								}))}
+								schema={props.help.node(['$defs', 'RouteMatch', 'properties', 'path'])}
+								onChange={value => {
+									ensureFirst();
+									field.onChange({
+										target: { value: { [value]: pathValue || '/' } as HttpMatch['path'] }
+									});
+								}}
+							/>
+						)}
 					/>
 				</FieldGroup>
 				<Field
@@ -1092,47 +1176,67 @@ function HttpMatchEditor(props: {
 					path="matches.0.path"
 					tooltip={props.help.field<GeneratedRouteMatch>('RouteMatch', 'path')}
 				>
-					<input
-						value={pathValue}
-						onChange={event =>
-							updateFirst({
-								...first,
-								path: { [pathType]: event.target.value }
-							} as typeof first)
-						}
-						placeholder="/"
-					/>
+					{(id, hintId, invalid) => (
+						<Controller
+							control={props.control}
+							name="route.matches.0.path"
+							render={({ field }) => (
+								<input
+									id={id}
+									aria-describedby={hintId}
+									aria-invalid={invalid || undefined}
+									value={pathValue}
+									onChange={event => {
+										ensureFirst();
+										field.onChange({
+											target: { value: { [pathType]: event.target.value } as HttpMatch['path'] }
+										});
+									}}
+									placeholder="/"
+								/>
+							)}
+						/>
+					)}
 				</Field>
 				<Field
 					label="Method"
 					path="matches.0.method"
 					tooltip={props.help.field<GeneratedRouteMatch>('RouteMatch', 'method')}
 				>
-					<input
-						value={first.method ?? ''}
-						onChange={event => updateFirst({ ...first, method: event.target.value || undefined })}
-						placeholder="GET"
-					/>
+					{(id, hintId, invalid) => (
+						<Controller
+							control={props.control}
+							name="route.matches.0.method"
+							render={({ field }) => (
+								<input
+									id={id}
+									aria-describedby={hintId}
+									aria-invalid={invalid || undefined}
+									value={field.value ?? ''}
+									onChange={event => {
+										ensureFirst();
+										field.onChange(event.target.value || undefined);
+									}}
+									placeholder="GET"
+								/>
+							)}
+						/>
+					)}
 				</Field>
 			</div>
 			<div className="form-grid">
-				<HeaderConditionsEditor
-					headers={first.headers ?? []}
-					onChange={headers => updateFirst({ ...first, headers })}
-				/>
-				<QueryConditionsEditor
-					query={first.query ?? []}
-					onChange={query => updateFirst({ ...first, query })}
-				/>
+				<HeaderConditionsEditor control={props.control} onAdd={ensureFirst} />
+				<QueryConditionsEditor control={props.control} onAdd={ensureFirst} />
 			</div>
 		</>
 	);
 }
 
-function HeaderConditionsEditor(props: {
-	headers: HeaderMatch[];
-	onChange: (headers: HeaderMatch[]) => void;
-}) {
+function HeaderConditionsEditor(props: { control: Control<RouteFormValues>; onAdd: () => void }) {
+	const { append, fields, remove } = useFieldArray({
+		control: props.control,
+		name: 'route.matches.0.headers'
+	});
 	return (
 		<div className="traffic-match-editor">
 			<div className="traffic-match-editor-header">
@@ -1143,27 +1247,23 @@ function HeaderConditionsEditor(props: {
 				<button
 					className="button small"
 					type="button"
-					onClick={() => props.onChange([...props.headers, { name: '', value: { exact: '' } }])}
+					onClick={() => {
+						props.onAdd();
+						append({ name: '', value: { exact: '' } }, { shouldFocus: false });
+					}}
 				>
 					<Plus size={16} />
 					Add header
 				</button>
 			</div>
-			{props.headers.length ? (
+			{fields.length ? (
 				<div className="match-header-list">
-					{props.headers.map((header, index) => (
+					{fields.map((field, index) => (
 						<HeaderConditionRow
-							// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-							key={index}
-							header={header}
-							onChange={next =>
-								props.onChange(
-									props.headers.map((item, itemIndex) => (itemIndex === index ? next : item))
-								)
-							}
-							onRemove={() =>
-								props.onChange(props.headers.filter((_, itemIndex) => itemIndex !== index))
-							}
+							key={field.id}
+							control={props.control}
+							name={`route.matches.0.headers.${index}`}
+							onRemove={() => remove(index)}
 						/>
 					))}
 				</div>
@@ -1175,66 +1275,74 @@ function HeaderConditionsEditor(props: {
 }
 
 function HeaderConditionRow(props: {
-	header: HeaderMatch;
-	onChange: (header: HeaderMatch) => void;
+	control: Control<RouteFormValues>;
+	name: `route.matches.0.headers.${number}`;
 	onRemove: () => void;
 }) {
-	const { mode, text } = matchValueParts(props.header.value);
-	const setMode = (regex: boolean) =>
-		props.onChange({
-			...props.header,
-			value: regex ? { regex: text } : { exact: text }
-		});
-	const setText = (next: string) =>
-		props.onChange({
-			...props.header,
-			value: mode === 'regex' ? { regex: next } : { exact: next }
-		});
-
 	return (
 		<div className="header-match-row">
-			<div className="condition-inputs">
-				<input
-					aria-label="Header name"
-					value={props.header.name}
-					onChange={event => props.onChange({ ...props.header, name: event.target.value })}
-					placeholder="Header name"
-				/>
-				<input
-					aria-label="Header value"
-					value={text}
-					onChange={event => setText(event.target.value)}
-					placeholder={mode === 'regex' ? 'Regex value' : 'Exact value'}
-				/>
-			</div>
-			<div className="condition-actions">
-				<label className={mode === 'regex' ? 'regex-toggle selected' : 'regex-toggle'}>
-					<input
-						type="checkbox"
-						checked={mode === 'regex'}
-						onChange={event => setMode(event.target.checked)}
-					/>
-					Regex
-				</label>
-				<Tooltip content="Remove header condition">
-					<button
-						className="icon-button danger"
-						type="button"
-						aria-label="Remove header condition"
-						onClick={props.onRemove}
-					>
-						<Trash2 size={15} />
-					</button>
-				</Tooltip>
-			</div>
+			<Controller
+				control={props.control}
+				name={`${props.name}.value`}
+				render={({ field }) => {
+					const { mode, text } = matchValueParts(field.value);
+					const setMode = (regex: boolean) =>
+						field.onChange({
+							target: { value: regex ? { regex: text } : { exact: text } }
+						});
+					const setText = (next: string) =>
+						field.onChange({
+							target: { value: mode === 'regex' ? { regex: next } : { exact: next } }
+						});
+
+					return (
+						<>
+							<div className="condition-inputs">
+								<input
+									aria-label="Header name"
+									{...props.control.register(`${props.name}.name`)}
+									placeholder="Header name"
+								/>
+								<input
+									aria-label="Header value"
+									value={text}
+									onChange={event => setText(event.target.value)}
+									placeholder={mode === 'regex' ? 'Regex value' : 'Exact value'}
+								/>
+							</div>
+							<div className="condition-actions">
+								<label className={mode === 'regex' ? 'regex-toggle selected' : 'regex-toggle'}>
+									<input
+										type="checkbox"
+										checked={mode === 'regex'}
+										onChange={event => setMode(event.target.checked)}
+									/>
+									Regex
+								</label>
+								<Tooltip content="Remove header condition">
+									<button
+										className="icon-button danger"
+										type="button"
+										aria-label="Remove header condition"
+										onClick={props.onRemove}
+									>
+										<Trash2 size={15} />
+									</button>
+								</Tooltip>
+							</div>
+						</>
+					);
+				}}
+			/>
 		</div>
 	);
 }
 
-function QueryConditionsEditor(props: {
-	query: QueryMatch[];
-	onChange: (query: QueryMatch[]) => void;
-}) {
+function QueryConditionsEditor(props: { control: Control<RouteFormValues>; onAdd: () => void }) {
+	const { append, fields, remove } = useFieldArray({
+		control: props.control,
+		name: 'route.matches.0.query'
+	});
 	return (
 		<div className="traffic-match-editor">
 			<div className="traffic-match-editor-header">
@@ -1245,27 +1353,23 @@ function QueryConditionsEditor(props: {
 				<button
 					className="button small"
 					type="button"
-					onClick={() => props.onChange([...props.query, { name: '', value: { exact: '' } }])}
+					onClick={() => {
+						props.onAdd();
+						append({ name: '', value: { exact: '' } }, { shouldFocus: false });
+					}}
 				>
 					<Plus size={16} />
 					Add query
 				</button>
 			</div>
-			{props.query.length ? (
+			{fields.length ? (
 				<div className="match-header-list">
-					{props.query.map((query, index) => (
+					{fields.map((field, index) => (
 						<QueryConditionRow
-							// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-							key={index}
-							query={query}
-							onChange={next =>
-								props.onChange(
-									props.query.map((item, itemIndex) => (itemIndex === index ? next : item))
-								)
-							}
-							onRemove={() =>
-								props.onChange(props.query.filter((_, itemIndex) => itemIndex !== index))
-							}
+							key={field.id}
+							control={props.control}
+							name={`route.matches.0.query.${index}`}
+							onRemove={() => remove(index)}
 						/>
 					))}
 				</div>
@@ -1277,58 +1381,65 @@ function QueryConditionsEditor(props: {
 }
 
 function QueryConditionRow(props: {
-	query: QueryMatch;
-	onChange: (query: QueryMatch) => void;
+	control: Control<RouteFormValues>;
+	name: `route.matches.0.query.${number}`;
 	onRemove: () => void;
 }) {
-	const { mode, text } = matchValueParts(props.query.value);
-	const setMode = (regex: boolean) =>
-		props.onChange({
-			...props.query,
-			value: regex ? { regex: text } : { exact: text }
-		});
-	const setText = (next: string) =>
-		props.onChange({
-			...props.query,
-			value: mode === 'regex' ? { regex: next } : { exact: next }
-		});
-
 	return (
 		<div className="header-match-row">
-			<div className="condition-inputs">
-				<input
-					aria-label="Query name"
-					value={props.query.name}
-					onChange={event => props.onChange({ ...props.query, name: event.target.value })}
-					placeholder="Query name"
-				/>
-				<input
-					aria-label="Query value"
-					value={text}
-					onChange={event => setText(event.target.value)}
-					placeholder={mode === 'regex' ? 'Regex value' : 'Exact value'}
-				/>
-			</div>
-			<div className="condition-actions">
-				<label className={mode === 'regex' ? 'regex-toggle selected' : 'regex-toggle'}>
-					<input
-						type="checkbox"
-						checked={mode === 'regex'}
-						onChange={event => setMode(event.target.checked)}
-					/>
-					Regex
-				</label>
-				<Tooltip content="Remove query condition">
-					<button
-						className="icon-button danger"
-						type="button"
-						aria-label="Remove query condition"
-						onClick={props.onRemove}
-					>
-						<Trash2 size={15} />
-					</button>
-				</Tooltip>
-			</div>
+			<Controller
+				control={props.control}
+				name={`${props.name}.value`}
+				render={({ field }) => {
+					const { mode, text } = matchValueParts(field.value);
+					const setMode = (regex: boolean) =>
+						field.onChange({
+							target: { value: regex ? { regex: text } : { exact: text } }
+						});
+					const setText = (next: string) =>
+						field.onChange({
+							target: { value: mode === 'regex' ? { regex: next } : { exact: next } }
+						});
+
+					return (
+						<>
+							<div className="condition-inputs">
+								<input
+									aria-label="Query name"
+									{...props.control.register(`${props.name}.name`)}
+									placeholder="Query name"
+								/>
+								<input
+									aria-label="Query value"
+									value={text}
+									onChange={event => setText(event.target.value)}
+									placeholder={mode === 'regex' ? 'Regex value' : 'Exact value'}
+								/>
+							</div>
+							<div className="condition-actions">
+								<label className={mode === 'regex' ? 'regex-toggle selected' : 'regex-toggle'}>
+									<input
+										type="checkbox"
+										checked={mode === 'regex'}
+										onChange={event => setMode(event.target.checked)}
+									/>
+									Regex
+								</label>
+								<Tooltip content="Remove query condition">
+									<button
+										className="icon-button danger"
+										type="button"
+										aria-label="Remove query condition"
+										onClick={props.onRemove}
+									>
+										<Trash2 size={15} />
+									</button>
+								</Tooltip>
+							</div>
+						</>
+					);
+				}}
+			/>
 		</div>
 	);
 }
@@ -1343,11 +1454,15 @@ type ServiceBackend = TrafficBackend & {
 type RouteGroupBackend = TrafficBackend & { routeGroup: string };
 
 function RouteBackendsEditor(props: {
+	control: Control<RouteFormValues>;
 	kind: RouteKind;
 	help: SchemaHelp;
 	backends: TrafficBackend[];
-	onChange: (backends: TrafficBackend[]) => void;
 }) {
+	const { append, fields, remove } = useFieldArray({
+		control: props.control,
+		name: 'route.backends'
+	});
 	return (
 		<div className="traffic-backend-editor">
 			<div className="traffic-match-editor-header">
@@ -1358,30 +1473,23 @@ function RouteBackendsEditor(props: {
 				<button
 					className="button small"
 					type="button"
-					onClick={() => props.onChange([...props.backends, makeBackend(props.kind, 'host')])}
+					onClick={() => append(makeBackend(props.kind, 'host'), { shouldFocus: false })}
 				>
 					<Plus size={16} />
 					Add backend
 				</button>
 			</div>
-			{props.backends.length ? (
+			{fields.length ? (
 				<div className="route-backend-list">
-					{props.backends.map((backend, index) => (
+					{fields.map((field, index) => (
 						<RouteBackendRow
-							// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-							key={index}
+							key={field.id}
+							control={props.control}
 							kind={props.kind}
-							path={`backends.${index}`}
+							index={index}
 							help={props.help}
-							backend={backend}
-							onChange={next =>
-								props.onChange(
-									props.backends.map((item, itemIndex) => (itemIndex === index ? next : item))
-								)
-							}
-							onRemove={() =>
-								props.onChange(props.backends.filter((_, itemIndex) => itemIndex !== index))
-							}
+							backend={props.backends[index]}
+							onRemove={() => remove(index)}
 						/>
 					))}
 				</div>
@@ -1393,12 +1501,11 @@ function RouteBackendsEditor(props: {
 }
 
 function RouteBackendRow(props: {
+	control: Control<RouteFormValues>;
 	kind: RouteKind;
-	// The backend's path in the route, such as `backends.0`.
-	path: string;
+	index: number;
 	help: SchemaHelp;
 	backend: TrafficBackend;
-	onChange: (backend: TrafficBackend) => void;
 	onRemove: () => void;
 }) {
 	const type = editableBackendKind(props.backend);
@@ -1407,6 +1514,9 @@ function RouteBackendRow(props: {
 	}
 
 	const backend = props.backend;
+	// The backend's name in the form, and its path in the route for schema help.
+	const name = `route.backends.${props.index}` as const;
+	const path = `backends.${props.index}`;
 	const weight = backendWeight(backend);
 	const policyRoot = props.kind === 'http' ? 'LocalBackendPolicies' : 'LocalTCPBackendPolicies';
 	return (
@@ -1419,56 +1529,75 @@ function RouteBackendRow(props: {
 							props.kind === 'http' ? 'LocalRouteBackend' : 'LocalTCPRouteBackend'
 						)}
 					>
-						<EnumSelector
-							ariaLabel="Backend target type"
-							value={type}
-							options={backendKindOptions(props.kind)}
-							schema={props.help.node([
-								'$defs',
-								props.kind === 'http' ? 'LocalRouteBackend' : 'LocalTCPRouteBackend'
-							])}
-							onChange={value => props.onChange(makeBackend(props.kind, value, backend))}
+						<Controller
+							control={props.control}
+							name={name}
+							render={({ field }) => (
+								<EnumSelector
+									ariaLabel="Backend target type"
+									value={type}
+									options={backendKindOptions(props.kind)}
+									schema={props.help.node([
+										'$defs',
+										props.kind === 'http' ? 'LocalRouteBackend' : 'LocalTCPRouteBackend'
+									])}
+									onChange={value =>
+										field.onChange({
+											target: { value: makeBackend(props.kind, value, field.value) }
+										})
+									}
+								/>
+							)}
 						/>
 					</FieldGroup>
 					<Field
 						label="Weight"
-						path={`${props.path}.weight`}
+						path={`${path}.weight`}
 						tooltip={
 							props.kind === 'http'
 								? props.help.field<TrafficRouteBackend>('LocalRouteBackend', 'weight')
 								: props.help.field<TrafficTcpRouteBackend>('LocalTCPRouteBackend', 'weight')
 						}
 					>
-						<input
-							min={1}
-							type="number"
-							value={weight}
-							onChange={event =>
-								props.onChange(
-									cleanBackendCommon({
-										...backend,
-										weight: Number(event.target.value) || 1
-									} as TrafficBackend)
-								)
-							}
-						/>
+						{(id, hintId, invalid) => (
+							<Controller
+								control={props.control}
+								name={`${name}.weight`}
+								render={({ field }) => (
+									<input
+										id={id}
+										aria-describedby={hintId}
+										aria-invalid={invalid || undefined}
+										min={1}
+										type="number"
+										value={weight}
+										onChange={event => field.onChange(Number(event.target.value) || 1)}
+									/>
+								)}
+							/>
+						)}
 					</Field>
 				</div>
 				<BackendTargetFields
 					kind={props.kind}
-					path={props.path}
+					name={name}
+					path={path}
 					backend={backend}
+					control={props.control}
 					targetKind={type}
 					help={props.help}
-					onChange={props.onChange}
 				/>
-				<TrafficPolicySection
-					title="Backend policies"
-					schemaRoot={policyRoot}
-					policies={backendPolicies(backend)}
-					onChange={policies =>
-						props.onChange(cleanBackendCommon({ ...backend, policies } as TrafficBackend))
-					}
+				<Controller
+					control={props.control}
+					name={`${name}.policies`}
+					render={({ field }) => (
+						<TrafficPolicySection
+							title="Backend policies"
+							schemaRoot={policyRoot}
+							policies={backendPolicies(backend)}
+							onChange={policies => field.onChange({ target: { value: policies } })}
+						/>
+					)}
 				/>
 			</div>
 			<Tooltip content="Remove backend">
@@ -1487,11 +1616,12 @@ function RouteBackendRow(props: {
 
 function BackendTargetFields(props: {
 	kind: RouteKind;
+	name: `route.backends.${number}`;
 	path: string;
 	targetKind: EditableBackendKind;
 	backend: TrafficBackend;
+	control: Control<RouteFormValues>;
 	help: SchemaHelp;
-	onChange: (backend: TrafficBackend) => void;
 }) {
 	if (props.targetKind === 'host' && isHostBackend(props.backend)) {
 		return (
@@ -1505,18 +1635,22 @@ function BackendTargetFields(props: {
 							: props.help.field<TrafficTcpRouteBackend>('LocalTCPRouteBackend', 'host')
 					}
 				>
-					<input
-						value={props.backend.host}
-						onChange={event =>
-							props.onChange(
-								cleanBackendCommon({
-									...props.backend,
-									host: event.target.value.trimStart()
-								})
-							)
-						}
-						placeholder="localhost:8080"
-					/>
+					{(id, hintId, invalid) => (
+						<Controller
+							control={props.control}
+							name={`${props.name}.host`}
+							render={({ field }) => (
+								<input
+									id={id}
+									aria-describedby={hintId}
+									aria-invalid={invalid || undefined}
+									value={field.value as string}
+									onChange={event => field.onChange(event.target.value.trimStart())}
+									placeholder="localhost:8080"
+								/>
+							)}
+						/>
+					)}
 				</Field>
 			</div>
 		);
@@ -1534,80 +1668,78 @@ function BackendTargetFields(props: {
 							: props.help.field<TrafficTcpRouteBackend>('LocalTCPRouteBackend', 'backend')
 					}
 				>
-					<input
-						value={props.backend.backend}
-						onChange={event =>
-							props.onChange(
-								cleanBackendCommon({
-									...props.backend,
-									backend: event.target.value.trimStart()
-								})
-							)
-						}
-						placeholder="backend-name"
-					/>
+					{(id, hintId, invalid) => (
+						<Controller
+							control={props.control}
+							name={`${props.name}.backend`}
+							render={({ field }) => (
+								<input
+									id={id}
+									aria-describedby={hintId}
+									aria-invalid={invalid || undefined}
+									value={field.value as string}
+									onChange={event => field.onChange(event.target.value.trimStart())}
+									placeholder="backend-name"
+								/>
+							)}
+						/>
+					)}
 				</Field>
 			</div>
 		);
 	}
 
 	if (props.targetKind === 'service' && isServiceBackend(props.backend)) {
-		const service = props.backend.service;
-		const serviceName = splitServiceName(service.name);
 		return (
 			<div className="route-backend-target-grid service">
-				<Field label="Namespace" path={`${props.path}.service.name`}>
-					<input
-						value={serviceName.namespace}
-						onChange={event =>
-							props.onChange(
-								cleanBackendCommon({
-									...props.backend,
-									service: {
-										...service,
-										name: formatServiceName(event.target.value, serviceName.hostname)
-									}
-								})
-							)
-						}
-						placeholder="default"
-					/>
-				</Field>
-				<Field label="Hostname" path={`${props.path}.service.name`}>
-					<input
-						value={serviceName.hostname}
-						onChange={event =>
-							props.onChange(
-								cleanBackendCommon({
-									...props.backend,
-									service: {
-										...service,
-										name: formatServiceName(serviceName.namespace, event.target.value)
-									}
-								})
-							)
-						}
-						placeholder="api"
-					/>
-				</Field>
+				<Controller
+					control={props.control}
+					name={`${props.name}.service.name`}
+					render={({ field }) => {
+						const serviceName = splitServiceName(field.value as string);
+						return (
+							<>
+								<Field label="Namespace" path={`${props.path}.service.name`}>
+									<input
+										value={serviceName.namespace}
+										onChange={event =>
+											field.onChange(formatServiceName(event.target.value, serviceName.hostname))
+										}
+										placeholder="default"
+									/>
+								</Field>
+								<Field label="Hostname" path={`${props.path}.service.name`}>
+									<input
+										value={serviceName.hostname}
+										onChange={event =>
+											field.onChange(formatServiceName(serviceName.namespace, event.target.value))
+										}
+										placeholder="api"
+									/>
+								</Field>
+							</>
+						);
+					}}
+				/>
 				<Field label="Port" path={`${props.path}.service.port`}>
-					<input
-						type="number"
-						min={1}
-						max={65535}
-						value={service.port}
-						onChange={event =>
-							props.onChange(
-								cleanBackendCommon({
-									...props.backend,
-									service: {
-										...service,
-										port: Number(event.target.value) || 80
-									}
-								})
-							)
-						}
-					/>
+					{(id, hintId, invalid) => (
+						<Controller
+							control={props.control}
+							name={`${props.name}.service.port`}
+							render={({ field }) => (
+								<input
+									id={id}
+									aria-describedby={hintId}
+									aria-invalid={invalid || undefined}
+									type="number"
+									min={1}
+									max={65535}
+									value={field.value}
+									onChange={event => field.onChange(Number(event.target.value) || 80)}
+								/>
+							)}
+						/>
+					)}
 				</Field>
 			</div>
 		);
@@ -1617,18 +1749,22 @@ function BackendTargetFields(props: {
 		return (
 			<div className="route-backend-target-grid single">
 				<Field label="Route group" path={`${props.path}.routeGroup`}>
-					<input
-						value={props.backend.routeGroup}
-						onChange={event =>
-							props.onChange(
-								cleanBackendCommon({
-									...props.backend,
-									routeGroup: event.target.value.trimStart()
-								})
-							)
-						}
-						placeholder="shared-routes"
-					/>
+					{(id, hintId, invalid) => (
+						<Controller
+							control={props.control}
+							name={`${props.name}.routeGroup`}
+							render={({ field }) => (
+								<input
+									id={id}
+									aria-describedby={hintId}
+									aria-invalid={invalid || undefined}
+									value={field.value as string}
+									onChange={event => field.onChange(event.target.value.trimStart())}
+									placeholder="shared-routes"
+								/>
+							)}
+						/>
+					)}
 				</Field>
 			</div>
 		);

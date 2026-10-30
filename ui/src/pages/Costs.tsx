@@ -1,5 +1,6 @@
 import { Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
+import { useFieldArray, useForm } from 'react-hook-form';
 
 import { ConfigSaveButton } from '@/components/ConfigDiffDrawer';
 import { EmptyState, formatNumber, PageHeader, Panel, StatusBanner } from '@/components/Primitives';
@@ -81,12 +82,16 @@ export function CostsPage() {
 	);
 	const saving = updateConfig.isPending || upsertResource.isPending;
 	const [editingCustom, setEditingCustom] = useState(false);
-	const [customDraft, setCustomDraft] = useState<CustomCostRow[]>(customRows);
 	const [customError, setCustomError] = useState<string | null>(null);
+	const { control, getValues, register, setValue } = useForm<{ rows: CustomCostRow[] }>({
+		defaultValues: { rows: customRows }
+	});
+	const { append, fields, remove } = useFieldArray({ control, name: 'rows' });
 
+	// Read-only rows follow the saved catalog, so they resync whenever it changes outside an edit.
 	useEffect(() => {
-		if (!editingCustom) setCustomDraft(customRows);
-	}, [customRows, editingCustom]);
+		if (!editingCustom) setValue('rows', customRows);
+	}, [customRows, editingCustom, setValue]);
 
 	async function refreshCosts() {
 		// ConfigSaveButton records file overrides for useUpdateConfig, but this endpoint writes the catalog directly.
@@ -158,18 +163,8 @@ export function CostsPage() {
 								</tr>
 							</thead>
 							<tbody>
-								{sources.map((source, index) => (
-									// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-									<tr key={index}>
-										<td>
-											<span className="badge">{source.storage}</span>
-										</td>
-										<td>
-											<code>{source.label}</code>
-										</td>
-										<td>{sourceType(source)}</td>
-									</tr>
-								))}
+								{/* Keyed by the sources' content, so a changed list remounts with new row ids. */}
+								<SourceRows key={JSON.stringify(sources)} sources={sources} />
 							</tbody>
 						</table>
 					</div>
@@ -196,7 +191,7 @@ export function CostsPage() {
 									type="button"
 									disabled={saving}
 									onClick={() => {
-										setCustomDraft(customRows);
+										setValue('rows', customRows);
 										setCustomError(null);
 										setEditingCustom(false);
 									}}
@@ -238,110 +233,59 @@ export function CostsPage() {
 							</tr>
 						</thead>
 						<tbody>
-							{(editingCustom ? customDraft : customRows).map((row, index) => (
-								// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-								<tr key={index}>
-									<td>
-										{editingCustom ? (
-											<input
-												value={row.provider}
-												onChange={event =>
-													patchCustomRow(index, {
-														provider: event.target.value
-													})
-												}
-												placeholder="openai"
-											/>
-										) : (
-											row.provider
-										)}
-									</td>
-									<td>
-										{editingCustom ? (
-											<input
-												value={row.model}
-												onChange={event => patchCustomRow(index, { model: event.target.value })}
-												placeholder="gpt-5-mini"
-											/>
-										) : (
-											row.model
-										)}
-									</td>
-									<td>
-										{editingCustom ? (
+							{editingCustom ? (
+								fields.map((field, index) => (
+									<tr key={field.id}>
+										<td>
+											<input {...register(`rows.${index}.provider`)} placeholder="openai" />
+										</td>
+										<td>
+											<input {...register(`rows.${index}.model`)} placeholder="gpt-5-mini" />
+										</td>
+										<td>
 											<input
 												className="cost-rate-input"
-												value={row.input}
-												onChange={event => patchCustomRow(index, { input: event.target.value })}
+												{...register(`rows.${index}.input`)}
 												placeholder="0.25"
 											/>
-										) : (
-											displayRate(row.input)
-										)}
-									</td>
-									<td>
-										{editingCustom ? (
+										</td>
+										<td>
 											<input
 												className="cost-rate-input"
-												value={row.output}
-												onChange={event => patchCustomRow(index, { output: event.target.value })}
+												{...register(`rows.${index}.output`)}
 												placeholder="2.00"
 											/>
-										) : (
-											displayRate(row.output)
-										)}
-									</td>
-									<td>
-										{editingCustom ? (
+										</td>
+										<td>
 											<input
 												className="cost-rate-input"
-												value={row.cacheRead}
-												onChange={event =>
-													patchCustomRow(index, {
-														cacheRead: event.target.value
-													})
-												}
+												{...register(`rows.${index}.cacheRead`)}
 												placeholder="0.025"
 											/>
-										) : (
-											displayRate(row.cacheRead)
-										)}
-									</td>
-									<td>
-										{editingCustom ? (
+										</td>
+										<td>
 											<input
 												className="cost-rate-input"
-												value={row.cacheWrite}
-												onChange={event =>
-													patchCustomRow(index, {
-														cacheWrite: event.target.value
-													})
-												}
+												{...register(`rows.${index}.cacheWrite`)}
 												placeholder="0.30"
 											/>
-										) : (
-											displayRate(row.cacheWrite)
-										)}
-									</td>
-									{editingCustom ? (
+										</td>
 										<td>
 											<button
 												className="icon-button danger"
 												type="button"
 												aria-label="Remove custom cost"
-												onClick={() =>
-													setCustomDraft(current =>
-														current.filter((_, itemIndex) => itemIndex !== index)
-													)
-												}
+												onClick={() => remove(index)}
 											>
 												<Trash2 size={15} />
 											</button>
 										</td>
-									) : null}
-								</tr>
-							))}
-							{editingCustom && customDraft.length === 0 ? (
+									</tr>
+								))
+							) : (
+								<CostReadRows key={JSON.stringify(customRows)} rows={customRows} />
+							)}
+							{editingCustom && fields.length === 0 ? (
 								<tr>
 									<td colSpan={7}>
 										<span className="muted-copy inline">No custom costs.</span>
@@ -360,11 +304,7 @@ export function CostsPage() {
 				</div>
 				{editingCustom ? (
 					<div className="button-row custom-cost-actions">
-						<button
-							className="button"
-							type="button"
-							onClick={() => setCustomDraft(current => [...current, emptyCustomCostRow()])}
-						>
+						<button className="button" type="button" onClick={() => append(emptyCustomCostRow())}>
 							<Plus size={16} />
 							Add model cost
 						</button>
@@ -374,15 +314,10 @@ export function CostsPage() {
 		</div>
 	);
 
-	function patchCustomRow(index: number, patch: Partial<CustomCostRow>) {
-		setCustomDraft(current =>
-			current.map((row, itemIndex) => (itemIndex === index ? { ...row, ...patch } : row))
-		);
-	}
-
 	async function saveCustomCosts() {
 		setCustomError(null);
-		const validationError = validateCustomRows(customDraft);
+		const rows = getValues('rows');
+		const validationError = validateCustomRows(rows);
 		if (validationError) {
 			setCustomError(validationError);
 			return;
@@ -392,7 +327,7 @@ export function CostsPage() {
 				kind: 'modelCatalog',
 				value: {
 					...catalog,
-					custom: inlineCatalog(customDraft)
+					custom: inlineCatalog(rows)
 				}
 			});
 			setEditingCustom(false);
@@ -400,6 +335,42 @@ export function CostsPage() {
 			setCustomError(err instanceof Error ? err.message : 'Failed to save custom costs');
 		}
 	}
+}
+
+// Duplicate file sources are meaningful (later sources override earlier ones), so rows
+// cannot be keyed by their values. Each row is the source itself; the caller remounts the
+// table when the list changes.
+function SourceRows(props: { sources: DisplayCostSource[] }) {
+	const { control } = useForm({ defaultValues: { sources: props.sources } });
+	const { fields } = useFieldArray({ control, name: 'sources' });
+	return fields.map(source => (
+		<tr key={source.id}>
+			<td>
+				<span className="badge">{source.storage}</span>
+			</td>
+			<td>
+				<code>{source.label}</code>
+			</td>
+			<td>{sourceType(source)}</td>
+		</tr>
+	));
+}
+
+// Read-only custom cost rows come straight from the saved catalog. Each row is the catalog
+// row itself; the caller remounts the table when the rows change.
+function CostReadRows(props: { rows: CustomCostRow[] }) {
+	const { control } = useForm({ defaultValues: { rows: props.rows } });
+	const { fields } = useFieldArray({ control, name: 'rows' });
+	return fields.map(row => (
+		<tr key={row.id}>
+			<td>{row.provider}</td>
+			<td>{row.model}</td>
+			<td>{displayRate(row.input)}</td>
+			<td>{displayRate(row.output)}</td>
+			<td>{displayRate(row.cacheRead)}</td>
+			<td>{displayRate(row.cacheWrite)}</td>
+		</tr>
+	));
 }
 
 function databaseCostSources(catalog: { base?: unknown; custom?: unknown }): DisplayCostSource[] {

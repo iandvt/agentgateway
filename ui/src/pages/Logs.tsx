@@ -19,7 +19,18 @@ import {
 	Wrench
 } from 'lucide-react';
 import { marked } from 'marked';
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+	type Dispatch,
+	type SetStateAction,
+	useCallback,
+	useEffect,
+	useId,
+	useLayoutEffect,
+	useMemo,
+	useRef,
+	useState
+} from 'react';
+import { useFieldArray, useForm } from 'react-hook-form';
 
 import { analyticsSummary, getLog, searchLogs, streamLogs } from '@/api/logsApi';
 import { ConfigDiffSaveActions } from '@/components/ConfigDiffDrawer';
@@ -1230,13 +1241,7 @@ function LogGuardrailBadge(props: { entry: LogEntry }) {
 			content={
 				<>
 					<strong>{label}</strong>
-					{guards.map((guard, index) => (
-						// biome-ignore lint/suspicious/noArrayIndexKey: Log evaluations are immutable and may repeat the same guard.
-						<div key={index}>
-							{String(guard.phase ?? '')}: {String(guard.guard ?? 'guardrail')} (
-							{String(guard.action ?? 'unknown')})
-						</div>
-					))}
+					<GuardrailBadgeLines guards={guards} />
 				</>
 			}
 		>
@@ -1245,6 +1250,19 @@ function LogGuardrailBadge(props: { entry: LogEntry }) {
 			</span>
 		</Tooltip>
 	);
+}
+
+function GuardrailBadgeLines(props: { guards: Record<string, unknown>[] }) {
+	const fields = useSyncedRows(props.guards, guard => JSON.stringify(guard));
+	return fields.map(field => {
+		const guard = field.item;
+		return (
+			<div key={field.id}>
+				{String(guard.phase ?? '')}: {String(guard.guard ?? 'guardrail')} (
+				{String(guard.action ?? 'unknown')})
+			</div>
+		);
+	});
 }
 
 function LogGuardrailDetails(props: { entry: LogEntry }) {
@@ -1267,50 +1285,57 @@ function LogGuardrailDetails(props: { entry: LogEntry }) {
 		<section className="log-detail-section">
 			<h4>Guardrails</h4>
 			<div className="log-guardrail-list">
-				{guards.map((guard, index) => {
-					const action = String(guard.action ?? 'unknown');
-					const outcome = outcomes[action];
-					const state =
-						action === 'reject'
-							? 'rejected'
-							: action === 'failOpen'
-								? 'failed-open'
-								: action === 'mask'
-									? 'masked'
-									: 'inactive';
-					const Icon =
-						action === 'reject' ? ShieldBan : action === 'mask' ? ShieldEllipsis : Shield;
-					return (
-						// biome-ignore lint/suspicious/noArrayIndexKey: Log evaluations are immutable and may repeat the same guard.
-						<div className="log-guardrail-result" key={index}>
-							<span className={`log-guardrail-badge ${state}`}>
-								<Icon size={18} aria-hidden="true" />
-							</span>
-							<div className="log-guardrail-context">
-								<div className="log-guardrail-heading">
-									<strong>{String(guard.guard ?? 'Guardrail')}</strong>
-									<span className="log-op-chip">
-										{guard.phase === 'request'
-											? 'Request'
-											: guard.phase === 'response'
-												? 'Response'
-												: String(guard.phase ?? 'Unknown phase')}
-									</span>
-									<span className={`log-guardrail-badge ${state}`}>{outcome?.label ?? action}</span>
-								</div>
-								{outcome ? <p>{outcome.description}</p> : null}
-								{typeof guard.guardrailId === 'string' ? (
-									<p>
-										Guardrail ID: <code>{guard.guardrailId}</code>
-									</p>
-								) : null}
-							</div>
-						</div>
-					);
-				})}
+				<GuardrailDetailRows guards={guards} outcomes={outcomes} />
 			</div>
 		</section>
 	);
+}
+
+function GuardrailDetailRows(props: {
+	guards: Record<string, unknown>[];
+	outcomes: Record<string, { label: string; description: string }>;
+}) {
+	const fields = useSyncedRows(props.guards, guard => JSON.stringify(guard));
+	return fields.map(field => {
+		const guard = field.item;
+		const action = String(guard.action ?? 'unknown');
+		const outcome = props.outcomes[action];
+		const state =
+			action === 'reject'
+				? 'rejected'
+				: action === 'failOpen'
+					? 'failed-open'
+					: action === 'mask'
+						? 'masked'
+						: 'inactive';
+		const Icon = action === 'reject' ? ShieldBan : action === 'mask' ? ShieldEllipsis : Shield;
+		return (
+			<div className="log-guardrail-result" key={field.id}>
+				<span className={`log-guardrail-badge ${state}`}>
+					<Icon size={18} aria-hidden="true" />
+				</span>
+				<div className="log-guardrail-context">
+					<div className="log-guardrail-heading">
+						<strong>{String(guard.guard ?? 'Guardrail')}</strong>
+						<span className="log-op-chip">
+							{guard.phase === 'request'
+								? 'Request'
+								: guard.phase === 'response'
+									? 'Response'
+									: String(guard.phase ?? 'Unknown phase')}
+						</span>
+						<span className={`log-guardrail-badge ${state}`}>{outcome?.label ?? action}</span>
+					</div>
+					{outcome ? <p>{outcome.description}</p> : null}
+					{typeof guard.guardrailId === 'string' ? (
+						<p>
+							Guardrail ID: <code>{guard.guardrailId}</code>
+						</p>
+					) : null}
+				</div>
+			</div>
+		);
+	});
 }
 
 function LogCallRow(props: {
@@ -1517,6 +1542,66 @@ function logUsageDetail(entry: LogEntry): LogUsageDetail {
 	};
 }
 
+// Rows are plain data: a signature and the item. RHF never copies or rewrites log objects.
+// A layout effect reconciles rows to the current items before paint, aligning by signature:
+// equal rows keep their ids, a changed row is updated (its id regenerates), and a change in
+// length inserts or removes only the differing span. An entry id, which LogCallRow keys, is
+// the only new snapshot.
+function useSyncedRows<T>(items: T[], signature: (item: T) => string) {
+	const [initial] = useState(() => items.map(item => ({ sig: signature(item), item })));
+	const { control, getValues } = useForm<{ rows: Array<{ sig: string; item: T }> }>({
+		defaultValues: { rows: initial }
+	});
+	const { fields, insert, remove, update } = useFieldArray({ control, name: 'rows' });
+	useLayoutEffect(() => {
+		const current = getValues('rows');
+		const sigs = items.map(signature);
+		let start = 0;
+		while (start < current.length && start < sigs.length && current[start].sig === sigs[start]) {
+			start++;
+		}
+		let tail = 0;
+		while (
+			tail < current.length - start &&
+			tail < sigs.length - start &&
+			current[current.length - 1 - tail].sig === sigs[sigs.length - 1 - tail]
+		) {
+			tail++;
+		}
+		const oldCount = current.length - start - tail;
+		const newCount = sigs.length - start - tail;
+		if (oldCount === newCount) {
+			for (let offset = 0; offset < oldCount; offset++) {
+				const at = start + offset;
+				if (current[at].sig !== sigs[at]) update(at, { sig: sigs[at], item: items[at] });
+			}
+			return;
+		}
+		if (oldCount > 0) remove(Array.from({ length: oldCount }, (_, offset) => start + offset));
+		if (newCount > 0) {
+			insert(
+				start,
+				items
+					.slice(start, start + newCount)
+					.map((item, offset) => ({ sig: sigs[start + offset], item }))
+			);
+		}
+	});
+	return fields;
+}
+
+// The message's events are row data too, so a row updates when its trajectory changes.
+function LogMessageRows(props: { messages: RenderedLogMessage[]; trajectory: TrajectoryEvent[] }) {
+	const items = props.messages.map((message, index) => ({
+		message,
+		events: props.trajectory.filter(event => event.messageIndex === index)
+	}));
+	const fields = useSyncedRows(items, item => JSON.stringify(item));
+	return fields.map(field => (
+		<LogMessageView events={field.item.events} message={field.item.message} key={field.id} />
+	));
+}
+
 function LogDetailView(props: {
 	entry: LogEntry;
 	promptLoggingEnabled: boolean;
@@ -1661,16 +1746,7 @@ function LogDetailView(props: {
 						</span>
 					</summary>
 					<div className="log-thread">
-						{messages.map((message, index) => (
-							<LogMessageView
-								events={trajectory.filter(event => event.messageIndex === index)}
-								message={message}
-								key={`${message.role}-${
-									// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-									index
-								}`}
-							/>
-						))}
+						<LogMessageRows messages={messages} trajectory={trajectory} />
 					</div>
 				</details>
 			) : props.promptLoggingEnabled ? (
@@ -1721,6 +1797,7 @@ const TRAJECTORY_LANES: Array<{ lane: TrajectoryLane; label: string }> = [
 
 function LogTrajectory(props: { events: TrajectoryEvent[]; onJump: (anchorId: string) => void }) {
 	const [selected, setSelected] = useState<number | null>(null);
+	const rows = useSyncedRows(props.events, event => JSON.stringify(event));
 	if (!props.events.length) return null;
 
 	const selectedEvent = selected == null ? null : props.events[selected];
@@ -1747,35 +1824,13 @@ function LogTrajectory(props: { events: TrajectoryEvent[]; onJump: (anchorId: st
 						<div className="log-trajectory-row" key={lane}>
 							<span className="log-trajectory-label">{label}</span>
 							<div className="log-trajectory-track" style={trackStyle}>
-								{props.events.map((event, index) =>
-									event.lane === lane ? (
-										<button
-											aria-label={`Step ${index + 1}: ${event.label}`}
-											aria-pressed={selected === index}
-											className={`log-trajectory-bar ${lane}${event.system ? ' system' : ''}${selected === index ? ' selected' : ''}`}
-											key={`${lane}-${
-												// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-												index
-											}`}
-											title={`Step ${index + 1}: ${event.label}`}
-											type="button"
-											onClick={() => setSelected(current => (current === index ? null : index))}
-											onDoubleClick={() => {
-												setSelected(index);
-												props.onJump(event.anchorId);
-											}}
-										/>
-									) : (
-										<span
-											aria-hidden="true"
-											className="log-trajectory-gap"
-											key={`${lane}-${
-												// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-												index
-											}`}
-										/>
-									)
-								)}
+								<TrajectoryTrack
+									lane={lane}
+									rows={rows}
+									selected={selected}
+									setSelected={setSelected}
+									onJump={props.onJump}
+								/>
 							</div>
 						</div>
 					))}
@@ -1801,6 +1856,36 @@ function LogTrajectory(props: { events: TrajectoryEvent[]; onJump: (anchorId: st
 			</div>
 		</section>
 	);
+}
+
+// Bars and gaps for one lane. Rows are the trajectory events themselves, shared by all lanes.
+function TrajectoryTrack(props: {
+	lane: TrajectoryLane;
+	rows: Array<{ id: string; item: TrajectoryEvent }>;
+	selected: number | null;
+	setSelected: Dispatch<SetStateAction<number | null>>;
+	onJump: (anchorId: string) => void;
+}) {
+	return props.rows.map((field, index) => {
+		const event = field.item;
+		return event.lane === props.lane ? (
+			<button
+				aria-label={`Step ${index + 1}: ${event.label}`}
+				aria-pressed={props.selected === index}
+				className={`log-trajectory-bar ${props.lane}${event.system ? ' system' : ''}${props.selected === index ? ' selected' : ''}`}
+				key={field.id}
+				title={`Step ${index + 1}: ${event.label}`}
+				type="button"
+				onClick={() => props.setSelected(current => (current === index ? null : index))}
+				onDoubleClick={() => {
+					props.setSelected(index);
+					props.onJump(event.anchorId);
+				}}
+			/>
+		) : (
+			<span aria-hidden="true" className="log-trajectory-gap" key={field.id} />
+		);
+	});
 }
 
 function trajectoryEvents(messages: RenderedLogMessage[]): TrajectoryEvent[] {
@@ -2122,6 +2207,64 @@ function LogUsagePanel(props: { usage: LogUsageDetail }) {
 	);
 }
 
+function LogMessagePartRows(props: {
+	parts: RenderedLogMessagePart[];
+	events: TrajectoryEvent[];
+	collapsed: boolean;
+}) {
+	const items = props.parts.map((part, index) => ({
+		part,
+		anchorId: props.events.find(event => event.partIndex === index)?.anchorId
+	}));
+	const fields = useSyncedRows(items, item => JSON.stringify(item));
+	return fields.map(field => (
+		<LogMessagePartView
+			anchorId={field.item.anchorId}
+			part={field.item.part}
+			collapsed={field.item.part.type === 'text' && props.collapsed}
+			key={field.id}
+		/>
+	));
+}
+
+function LogToolCallRows(props: {
+	calls: NonNullable<RenderedLogMessage['toolCalls']>;
+	events: TrajectoryEvent[];
+}) {
+	const items = props.calls.map((call, index) => ({
+		call,
+		anchorId: props.events[index]?.anchorId
+	}));
+	const fields = useSyncedRows(items, item => JSON.stringify(item));
+	return fields.map(field => (
+		<LogToolBlock
+			anchorId={field.item.anchorId}
+			kind="call"
+			name={field.item.call.name}
+			value={field.item.call.arguments}
+			key={field.id}
+		/>
+	));
+}
+
+function LogToolResultRows(props: { results: NonNullable<RenderedLogMessage['toolResults']> }) {
+	const fields = useSyncedRows(props.results, item => JSON.stringify(item));
+	return fields.map(field => (
+		<LogToolBlock
+			kind="result"
+			name={field.item.name ?? 'unknown'}
+			value={field.item.content}
+			isError={field.item.isError}
+			key={field.id}
+		/>
+	));
+}
+
+function LogReasoningRows(props: { reasonings: NonNullable<RenderedLogMessage['reasoning']> }) {
+	const fields = useSyncedRows(props.reasonings, item => JSON.stringify(item));
+	return fields.map(field => <LogReasoningBlock content={field.item} key={field.id} />);
+}
+
 const LOG_ROLE_LABELS: Record<RenderedLogMessage['role'], string> = {
 	system: 'System',
 	user: 'User',
@@ -2164,17 +2307,7 @@ function LogMessageView(props: { message: RenderedLogMessage; events: Trajectory
 			<div className="log-msg-body">
 				{message.parts ? (
 					<>
-						{message.parts.map((part, index) => (
-							<LogMessagePartView
-								anchorId={props.events.find(event => event.partIndex === index)?.anchorId}
-								part={part}
-								collapsed={part.type === 'text' && collapsed}
-								key={`${part.type}-${
-									// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-									index
-								}`}
-							/>
-						))}
+						<LogMessagePartRows parts={message.parts} events={props.events} collapsed={collapsed} />
 						{collapsible ? (
 							<button
 								className="log-msg-toggle"
@@ -2203,45 +2336,15 @@ function LogMessageView(props: { message: RenderedLogMessage; events: Trajectory
 						) : null}
 					</>
 				) : null}
-				{!message.parts && hasToolCalls
-					? message.toolCalls?.map((call, index) => (
-							<LogToolBlock
-								anchorId={toolCallEvents[index]?.anchorId}
-								kind="call"
-								name={call.name}
-								value={call.arguments}
-								key={`${call.name}-${
-									// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-									index
-								}`}
-							/>
-						))
-					: null}
-				{!message.parts && hasToolResults
-					? message.toolResults?.map((result, index) => (
-							<LogToolBlock
-								kind="result"
-								name={result.name ?? 'unknown'}
-								value={result.content}
-								isError={result.isError}
-								key={`${result.id ?? result.name ?? 'result'}-${
-									// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-									index
-								}`}
-							/>
-						))
-					: null}
-				{!message.parts && hasReasoning
-					? message.reasoning?.map((reasoning, index) => (
-							<LogReasoningBlock
-								content={reasoning}
-								key={`reasoning-${
-									// biome-ignore lint/suspicious/noArrayIndexKey: Existing lint violation; remove this suppression when the underlying issue is fixed.
-									index
-								}`}
-							/>
-						))
-					: null}
+				{!message.parts && hasToolCalls ? (
+					<LogToolCallRows calls={message.toolCalls ?? []} events={toolCallEvents} />
+				) : null}
+				{!message.parts && hasToolResults ? (
+					<LogToolResultRows results={message.toolResults ?? []} />
+				) : null}
+				{!message.parts && hasReasoning ? (
+					<LogReasoningRows reasonings={message.reasoning ?? []} />
+				) : null}
 				{!content && !hasToolCalls && !hasToolResults && !hasReasoning ? (
 					<span className="log-msg-empty">empty message</span>
 				) : null}
